@@ -426,7 +426,7 @@ mod tests {
         });
         agent.join().unwrap();
 
-        assert!(!session.is_running().unwrap());
+        assert!(!wait_until_stopped(&mut session));
         assert_eq!(
             session.termination(),
             Some(&AgentExit::status(
@@ -441,12 +441,27 @@ mod tests {
         let (mut session, agent) = connected_test_session(drop);
         agent.join().unwrap();
 
-        assert!(!session.is_running().unwrap());
+        assert!(!wait_until_stopped(&mut session));
         assert_eq!(session.termination().unwrap().success, Some(false));
         assert_eq!(
             session.termination().unwrap().message,
             "agent transport closed without an exit status"
         );
+    }
+
+    /// The peer thread joining only guarantees it has sent its bytes or
+    /// closed its socket, not that the kernel has delivered that to our
+    /// nonblocking reader yet. A single `is_running()` check can still see
+    /// WouldBlock and race, so poll until it settles instead.
+    fn wait_until_stopped(session: &mut FirecrabSession) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let running = session.is_running().unwrap();
+            if !running || Instant::now() >= deadline {
+                return running;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
     }
 
     fn connected_test_session(
