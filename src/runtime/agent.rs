@@ -129,7 +129,11 @@ fn run_connected_agent(
                     session.resize(width, height)?;
                     force_frame = true;
                 }
-                ClientMessage::Input(input) => session.inject(&input)?,
+                ClientMessage::Input(input) => {
+                    if let Err(error) = session.inject(&input) {
+                        debug.log(format!("dropped unsupported input event: {error}"));
+                    }
+                }
                 ClientMessage::Stop => {
                     let exit = AgentExit::status(true, "client requested stop");
                     debug.log(format!("stopping reason={:?}", exit.message));
