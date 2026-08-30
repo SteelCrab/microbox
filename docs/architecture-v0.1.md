@@ -222,8 +222,12 @@ terminal resize 시에는 다음 순서를 사용합니다.
 - Kitty keyboard enhancement 및 일반 key fallback decoder
 - X11 keyboard mapping 기반 XTEST key/button/motion 주입
 - terminal resize 시 image placement와 입력 좌표 재계산
+- XDamage 기반 변경 감지와 bounded frame clock
+- MIT-SHM capture 및 `GetImage` fallback
+- 64px dirty-tile overlay와 35% full-frame 임계값
+- `--fps` 및 `--stats` 성능 진단
 
 `run`의 native interactive 경로는 연결되었습니다. 현재 resize는 640×360 X
 framebuffer를 새 terminal cell 영역에 맞춰 표시하고 좌표를 다시 매핑합니다.
-X framebuffer 동적 resize와 dirty-tile 전송은 아직 구현되지 않았습니다.
+X framebuffer 동적 resize는 아직 구현되지 않았습니다.
 Firecrab runtime을 선택하면 지원 예정이라는 명시적인 오류를 반환합니다.

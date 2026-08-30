@@ -63,6 +63,28 @@ impl Frame {
         &self.pixels
     }
 
+    pub fn crop(&self, rect: Rect) -> Result<Self, FrameError> {
+        let right = rect
+            .x
+            .checked_add(rect.width)
+            .ok_or(FrameError::DimensionsOverflow)?;
+        let bottom = rect
+            .y
+            .checked_add(rect.height)
+            .ok_or(FrameError::DimensionsOverflow)?;
+        if rect.width == 0 || rect.height == 0 || right > self.width || bottom > self.height {
+            return Err(FrameError::InvalidCrop(rect));
+        }
+        let mut pixels = Vec::with_capacity(pixel_bytes(rect.width, rect.height).unwrap());
+        let stride = self.width as usize * 3;
+        let row_bytes = rect.width as usize * 3;
+        for row in rect.y..bottom {
+            let start = row as usize * stride + rect.x as usize * 3;
+            pixels.extend_from_slice(&self.pixels[start..start + row_bytes]);
+        }
+        Self::new_rgb(rect.width, rect.height, pixels)
+    }
+
     pub fn dirty_tiles(&self, previous: &Self, tile_size: u32) -> Vec<Rect> {
         if tile_size == 0 || self.width != previous.width || self.height != previous.height {
             return vec![Rect {
@@ -114,6 +136,7 @@ fn pixel_bytes(width: u32, height: u32) -> Option<usize> {
 pub enum FrameError {
     DimensionsOverflow,
     InvalidBufferLength { expected: usize, actual: usize },
+    InvalidCrop(Rect),
 }
 
 impl Display for FrameError {
@@ -124,6 +147,7 @@ impl Display for FrameError {
                 formatter,
                 "invalid RGB buffer length: expected {expected} bytes, got {actual}"
             ),
+            Self::InvalidCrop(rect) => write!(formatter, "invalid frame crop {rect:?}"),
         }
     }
 }
@@ -164,5 +188,19 @@ mod tests {
                 height: 2,
             }]
         );
+    }
+
+    #[test]
+    fn crops_rgb_rows_without_padding() {
+        let frame = Frame::from_rgb_fn(3, 2, |x, y| [x as u8, y as u8, 9]);
+        let crop = frame
+            .crop(Rect {
+                x: 1,
+                y: 0,
+                width: 2,
+                height: 2,
+            })
+            .unwrap();
+        assert_eq!(crop.pixels(), &[1, 0, 9, 2, 0, 9, 1, 1, 9, 2, 1, 9]);
     }
 }

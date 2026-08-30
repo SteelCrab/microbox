@@ -52,10 +52,18 @@ micro-gui run my-app -- --application-argument
 ```
 
 `run` creates a private 640×360 Xvfb display, expands the first mapped window,
-captures the X11 root image at 10 FPS, and replaces image ID 1 in the terminal.
+captures the X11 root image at up to 30 FPS, and renders it in the terminal.
 The terminal enters an alternate screen with mouse tracking; keyboard and mouse
 events are forwarded through XTEST. Press `Ctrl-C` to stop the application and
 its Xvfb process group.
+
+XDamage skips unchanged captures, MIT-SHM is used when available, and small
+changes are sent as 64-pixel tile overlays. The frame rate and render counters
+can be inspected with:
+
+```sh
+micro-gui run xeyes --fps 30 --stats
+```
 
 The future Firecrab form remains reserved:
 
@@ -67,7 +75,7 @@ micro-gui run firefox --runtime firecrab
 
 - One foreground application per process
 - Linux and an X11/Xvfb display backend
-- Kitty Graphics full-frame output, followed by dirty-tile updates
+- Kitty Graphics full-frame and dirty-tile output
 - Keyboard, mouse, and terminal-resize forwarding (fixed-size GUI framebuffer)
 - Deterministic cleanup when the application or client exits
 

@@ -55,17 +55,19 @@ Kitty 호환 terminal에서의 GTK Demo 수동 조작 확인은 release checklis
 
 ## M3 — Rendering efficiency
 
-- [ ] render loop backpressure
-- [ ] dirty tile update 연결
-- [ ] 변경 면적 기반 full/tile 선택
-- [ ] 목표 frame rate 옵션과 CPU 측정
-- [ ] MIT-SHM capture fast path
+- [x] render loop backpressure
+- [x] dirty tile update 연결
+- [x] 변경 면적 기반 full/tile 선택
+- [x] 목표 frame rate 옵션과 CPU 측정
+- [x] MIT-SHM capture fast path
 
 초기 성능 목표:
 
 - idle 상태 CPU 5% 미만(개발 기준 장비에서 측정 조건과 함께 기록)
 - 기본 목표 30 FPS, 느린 연결에서는 최신 frame 우선
 - 입력 event 순서 보존
+
+측정 조건과 결과는 [performance.md](performance.md)에 기록합니다.
 
 ## M4 — v0.1 hardening
 

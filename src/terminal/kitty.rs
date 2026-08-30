@@ -55,6 +55,24 @@ impl<W: Write> KittyEncoder<W> {
         self.transmit_rgb_inner(frame, image_id, Some((columns.max(1), rows.max(1))))
     }
 
+    pub fn transmit_rgb_at(
+        &mut self,
+        frame: &Frame,
+        image_id: u32,
+        column: u16,
+        row: u16,
+        columns: u16,
+        rows: u16,
+    ) -> io::Result<()> {
+        write!(
+            self.output,
+            "\x1b[{};{}H",
+            u32::from(row) + 1,
+            u32::from(column) + 1
+        )?;
+        self.transmit_rgb_inner(frame, image_id, Some((columns.max(1), rows.max(1))))
+    }
+
     fn transmit_rgb_inner(
         &mut self,
         frame: &Frame,
@@ -70,14 +88,14 @@ impl<W: Write> KittyEncoder<W> {
                 match placement {
                     Some((columns, rows)) => write!(
                         self.output,
-                        "\x1b_Ga=T,f=24,s={},v={},i={},q=1,c={columns},r={rows},m={more};",
+                        "\x1b_Ga=T,f=24,s={},v={},i={},q=1,c={columns},r={rows},C=1,m={more};",
                         frame.width(),
                         frame.height(),
                         image_id
                     )?,
                     None => write!(
                         self.output,
-                        "\x1b_Ga=T,f=24,s={},v={},i={},q=1,m={more};",
+                        "\x1b_Ga=T,f=24,s={},v={},i={},q=1,C=1,m={more};",
                         frame.width(),
                         frame.height(),
                         image_id
@@ -159,7 +177,7 @@ mod tests {
         encoder.transmit_rgb(&frame, 7).unwrap();
         let bytes = encoder.into_inner();
         let text = String::from_utf8(bytes).unwrap();
-        assert_eq!(text, "\x1b_Ga=T,f=24,s=1,v=1,i=7,q=1,m=0;/wAA\x1b\\");
+        assert_eq!(text, "\x1b_Ga=T,f=24,s=1,v=1,i=7,q=1,C=1,m=0;/wAA\x1b\\");
     }
 
     #[test]
@@ -168,6 +186,6 @@ mod tests {
         let mut encoder = KittyEncoder::new(Vec::new());
         encoder.transmit_rgb_placed(&frame, 3, 80, 24).unwrap();
         let text = String::from_utf8(encoder.into_inner()).unwrap();
-        assert!(text.starts_with("\x1b_Ga=T,f=24,s=1,v=1,i=3,q=1,c=80,r=24,m=0;"));
+        assert!(text.starts_with("\x1b_Ga=T,f=24,s=1,v=1,i=3,q=1,c=80,r=24,C=1,m=0;"));
     }
 }

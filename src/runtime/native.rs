@@ -166,8 +166,16 @@ impl NativeSession {
         })
     }
 
-    pub fn capture(&self) -> Result<Frame, NativeError> {
+    pub fn capture(&mut self) -> Result<Frame, NativeError> {
         self.display.capture().map_err(NativeError::X11)
+    }
+
+    pub fn capture_method(&self) -> &'static str {
+        self.display.capture_method()
+    }
+
+    pub fn frame_pending(&mut self) -> Result<bool, NativeError> {
+        self.display.frame_pending().map_err(NativeError::X11)
     }
 
     pub fn inject(&self, event: &InputEvent) -> Result<(), NativeError> {
@@ -322,7 +330,8 @@ mod tests {
     fn captures_xeyes_frame() {
         let _test_lock = XVFB_TEST_LOCK.lock().unwrap();
         let spec = ApplicationSpec::new("xeyes", []);
-        let session = NativeSession::start(&spec, 320, 180).unwrap();
+        let mut session = NativeSession::start(&spec, 320, 180).unwrap();
+        assert_eq!(session.capture_method(), "MIT-SHM");
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         loop {
             let frame = session.capture().unwrap();

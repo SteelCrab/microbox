@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 use micro_gui::protocol::{InputEvent, ViewportMapping};
 use micro_gui::runtime::{ApplicationSpec, NativeSession};
 use micro_gui::terminal::{
-    DemoOptions, DoctorReport, KittyEncoder, TerminalAction, TerminalGuard, poll_action,
-    render_demo,
+    DemoOptions, DoctorReport, KittyFrameRenderer, RenderOutcome, TerminalAction, TerminalGuard,
+    poll_action, render_demo,
 };
 
 const HELP: &str = r#"micro-gui — GUI applications, without the desktop
@@ -18,7 +18,7 @@ const HELP: &str = r#"micro-gui — GUI applications, without the desktop
 Usage:
   micro-gui doctor
   micro-gui demo [--width PIXELS] [--height PIXELS]
-  micro-gui run <APPLICATION> [--runtime native|firecrab] [-- ARGS...]
+  micro-gui run <APPLICATION> [--runtime native|firecrab] [--fps 1..60] [--stats] [-- ARGS...]
   micro-gui help
 
 Commands:
@@ -97,6 +97,8 @@ struct RunOptions {
     application: String,
     application_arguments: Vec<String>,
     runtime: String,
+    fps: u16,
+    stats: bool,
 }
 
 fn parse_run_options(args: &[String]) -> Result<RunOptions, String> {
@@ -104,6 +106,8 @@ fn parse_run_options(args: &[String]) -> Result<RunOptions, String> {
         return Err("run requires an application".into());
     };
     let mut runtime = "native";
+    let mut fps = 30;
+    let mut stats = false;
     let mut application_arguments = Vec::new();
     let mut index = 1;
     while index < args.len() {
@@ -121,6 +125,24 @@ fn parse_run_options(args: &[String]) -> Result<RunOptions, String> {
             index += 2;
             continue;
         }
+        if args[index] == "--fps" {
+            let value = args
+                .get(index + 1)
+                .ok_or_else(|| "--fps requires a value".to_string())?;
+            fps = value
+                .parse::<u16>()
+                .map_err(|_| format!("'{value}' is not a valid frame rate"))?;
+            if !(1..=60).contains(&fps) {
+                return Err("--fps must be between 1 and 60".into());
+            }
+            index += 2;
+            continue;
+        }
+        if args[index] == "--stats" {
+            stats = true;
+            index += 1;
+            continue;
+        }
         return Err(format!(
             "unexpected argument '{}'; put application arguments after --",
             args[index]
@@ -131,6 +153,8 @@ fn parse_run_options(args: &[String]) -> Result<RunOptions, String> {
         application: application.clone(),
         application_arguments,
         runtime: runtime.into(),
+        fps,
+        stats,
     })
 }
 
@@ -172,14 +196,19 @@ fn run_application(options: RunOptions) -> Result<(), String> {
     .expect("normalized terminal and display dimensions must be non-zero");
 
     let stdout = std::io::stdout();
-    let mut encoder = KittyEncoder::new(stdout.lock());
-    let frame_interval = Duration::from_millis(100);
+    let mut renderer = KittyFrameRenderer::new(stdout.lock(), columns, rows);
+    let frame_interval = Duration::from_secs_f64(1.0 / f64::from(options.fps));
     let mut next_frame = Instant::now();
+    let mut force_capture = true;
+    let mut stats = RenderStats::default();
     let render_result = (|| {
         'session: while running.load(Ordering::SeqCst)
             && session.is_running().map_err(|error| error.to_string())?
         {
-            for action in poll_action(Duration::from_millis(5), keyboard_enhanced)
+            let input_wait = next_frame
+                .saturating_duration_since(Instant::now())
+                .min(Duration::from_millis(20));
+            for action in poll_action(input_wait, keyboard_enhanced)
                 .map_err(|error| format!("terminal input failed: {error}"))?
             {
                 match action {
@@ -201,6 +230,8 @@ fn run_application(options: RunOptions) -> Result<(), String> {
                             columns = new_columns;
                             rows = new_rows;
                             mapping = new_mapping;
+                            renderer.resize(columns, rows);
+                            force_capture = true;
                             next_frame = Instant::now();
                         }
                     }
@@ -209,10 +240,19 @@ fn run_application(options: RunOptions) -> Result<(), String> {
             }
 
             if Instant::now() >= next_frame {
-                let frame = session.capture().map_err(|error| error.to_string())?;
-                encoder
-                    .transmit_rgb_placed(&frame, 1, columns, rows)
-                    .map_err(|error| format!("terminal frame write failed: {error}"))?;
+                stats.polls += 1;
+                let damaged = session.frame_pending().map_err(|error| error.to_string())?;
+                let frame_pending = force_capture || damaged;
+                if frame_pending {
+                    let frame = session.capture().map_err(|error| error.to_string())?;
+                    let outcome = renderer
+                        .render(&frame)
+                        .map_err(|error| format!("terminal frame write failed: {error}"))?;
+                    stats.observe(outcome);
+                    force_capture = false;
+                } else {
+                    stats.skipped += 1;
+                }
                 next_frame = Instant::now() + frame_interval;
             } else {
                 thread::yield_now();
@@ -220,10 +260,54 @@ fn run_application(options: RunOptions) -> Result<(), String> {
         }
         Ok(())
     })();
-    let _ = encoder.delete(1);
-    drop(encoder);
+    let _ = renderer.clear();
+    drop(renderer);
     drop(terminal_guard);
+    if options.stats {
+        eprintln!("{stats}");
+    }
     render_result
+}
+
+#[derive(Default)]
+struct RenderStats {
+    polls: u64,
+    captured: u64,
+    full: u64,
+    tile_frames: u64,
+    tiles: u64,
+    unchanged: u64,
+    skipped: u64,
+}
+
+impl RenderStats {
+    fn observe(&mut self, outcome: RenderOutcome) {
+        self.captured += 1;
+        match outcome {
+            RenderOutcome::Unchanged => self.unchanged += 1,
+            RenderOutcome::Full => self.full += 1,
+            RenderOutcome::Tiles(count) => {
+                self.tile_frames += 1;
+                self.tiles += count as u64;
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for RenderStats {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "micro-gui render stats: polls={}, captured={}, full={}, tile_frames={}, tiles={}, unchanged={}, skipped={}",
+            self.polls,
+            self.captured,
+            self.full,
+            self.tile_frames,
+            self.tiles,
+            self.unchanged,
+            self.skipped
+        )
+    }
 }
 
 fn map_terminal_input(input: InputEvent, mapping: ViewportMapping) -> InputEvent {
@@ -276,7 +360,22 @@ mod tests {
                 application: "viewer".into(),
                 application_arguments: vec!["a file.png".into()],
                 runtime: "native".into(),
+                fps: 30,
+                stats: false,
             }
         );
+    }
+
+    #[test]
+    fn parses_frame_rate_and_stats() {
+        let options = parse_run_options(&[
+            "xeyes".into(),
+            "--fps".into(),
+            "45".into(),
+            "--stats".into(),
+        ])
+        .unwrap();
+        assert_eq!(options.fps, 45);
+        assert!(options.stats);
     }
 }

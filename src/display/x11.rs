@@ -1,14 +1,21 @@
+use std::borrow::Cow;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
+use std::fs::File;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use memmap2::{MmapMut, MmapOptions};
 use x11rb::CURRENT_TIME;
-use x11rb::connection::Connection;
-use x11rb::image::{Image, PixelLayout};
+use x11rb::connection::{Connection, RequestConnection};
+use x11rb::image::{BitsPerPixel, Image, ImageOrder, PixelLayout, ScanlinePad};
+use x11rb::protocol::Event;
+use x11rb::protocol::damage::{self, ConnectionExt as DamageConnectionExt};
+use x11rb::protocol::shm::{self, ConnectionExt as ShmConnectionExt};
 use x11rb::protocol::xproto::{
-    BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT, ConfigureWindowAux, ConnectionExt, InputFocus,
-    KEY_PRESS_EVENT, KEY_RELEASE_EVENT, MOTION_NOTIFY_EVENT, MapState, Visualid, Window,
+    BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT, ConfigureWindowAux, ConnectionExt, ImageFormat,
+    InputFocus, KEY_PRESS_EVENT, KEY_RELEASE_EVENT, MOTION_NOTIFY_EVENT, MapState, Visualid,
+    Window,
 };
 use x11rb::protocol::xtest::ConnectionExt as XTestConnectionExt;
 use x11rb::rust_connection::RustConnection;
@@ -25,6 +32,8 @@ pub struct X11Display {
     height: u16,
     pixel_layout: PixelLayout,
     keyboard_map: KeyboardMap,
+    shm_capture: Option<ShmCapture>,
+    damage: Option<DamageTracker>,
 }
 
 impl X11Display {
@@ -49,6 +58,10 @@ impl X11Display {
             .reply()
             .map_err(|error| X11Error::UnsupportedXTest(error.to_string()))?;
         let keyboard_map = KeyboardMap::load(&connection)?;
+        let shm_capture = ShmCapture::try_new(&connection, width, height, screen.root_depth)
+            .ok()
+            .flatten();
+        let damage = DamageTracker::try_new(&connection, root).ok().flatten();
 
         Ok(Self {
             connection,
@@ -57,6 +70,8 @@ impl X11Display {
             height,
             pixel_layout,
             keyboard_map,
+            shm_capture,
+            damage,
         })
     }
 
@@ -108,7 +123,43 @@ impl X11Display {
         self.connection.flush().map_err(connection_error)
     }
 
-    pub fn capture(&self) -> Result<Frame, X11Error> {
+    pub fn capture(&mut self) -> Result<Frame, X11Error> {
+        if let Some(shm_capture) = &mut self.shm_capture {
+            let reply = self
+                .connection
+                .shm_get_image(
+                    self.root,
+                    0,
+                    0,
+                    self.width,
+                    self.height,
+                    !0,
+                    ImageFormat::Z_PIXMAP.into(),
+                    shm_capture.segment,
+                    0,
+                )
+                .map_err(connection_error)?
+                .reply()
+                .map_err(reply_error)?;
+            if reply.size as usize > shm_capture.mapping.len() {
+                return Err(X11Error::InvalidSharedImageSize {
+                    expected: shm_capture.mapping.len(),
+                    actual: reply.size as usize,
+                });
+            }
+            let image = Image::new(
+                self.width,
+                self.height,
+                shm_capture.scanline_pad,
+                reply.depth,
+                shm_capture.bits_per_pixel,
+                shm_capture.byte_order,
+                Cow::Borrowed(&shm_capture.mapping[..]),
+            )
+            .map_err(|error| X11Error::Capture(error.to_string()))?;
+            return frame_from_image(&image, self.width, self.height, self.pixel_layout);
+        }
+
         let (image, visual) =
             Image::get(&self.connection, self.root, 0, 0, self.width, self.height)
                 .map_err(|error| X11Error::Capture(error.to_string()))?;
@@ -122,23 +173,26 @@ impl X11Display {
                 .map_err(|error| X11Error::UnsupportedVisual(error.to_string()))?
         };
 
-        let mut pixels = Vec::with_capacity(usize::from(self.width) * usize::from(self.height) * 3);
-        for y in 0..self.height {
-            for x in 0..self.width {
-                let (red, green, blue) = pixel_layout.decode(image.get_pixel(x, y));
-                pixels.extend_from_slice(&[
-                    (red >> 8) as u8,
-                    (green >> 8) as u8,
-                    (blue >> 8) as u8,
-                ]);
-            }
-        }
-        Frame::new_rgb(u32::from(self.width), u32::from(self.height), pixels)
-            .map_err(|error| X11Error::Capture(error.to_string()))
+        frame_from_image(&image, self.width, self.height, pixel_layout)
     }
 
     pub fn size(&self) -> (u16, u16) {
         (self.width, self.height)
+    }
+
+    pub fn capture_method(&self) -> &'static str {
+        if self.shm_capture.is_some() {
+            "MIT-SHM"
+        } else {
+            "GetImage"
+        }
+    }
+
+    pub fn frame_pending(&mut self) -> Result<bool, X11Error> {
+        match &mut self.damage {
+            Some(damage) => damage.take(&self.connection),
+            None => Ok(true),
+        }
     }
 
     #[cfg(test)]
@@ -268,6 +322,153 @@ impl X11Display {
     }
 }
 
+impl Drop for X11Display {
+    fn drop(&mut self) {
+        if let Some(damage) = &self.damage {
+            if let Ok(cookie) = self.connection.damage_destroy(damage.id) {
+                let _ = cookie.check();
+            }
+        }
+        if let Some(shm_capture) = &self.shm_capture {
+            if let Ok(cookie) = self.connection.shm_detach(shm_capture.segment) {
+                let _ = cookie.check();
+            }
+        }
+    }
+}
+
+struct DamageTracker {
+    id: damage::Damage,
+    first_frame: bool,
+}
+
+impl DamageTracker {
+    fn try_new(connection: &RustConnection, root: Window) -> Result<Option<Self>, X11Error> {
+        if connection
+            .extension_information(damage::X11_EXTENSION_NAME)
+            .map_err(connection_error)?
+            .is_none()
+        {
+            return Ok(None);
+        }
+        connection
+            .damage_query_version(1, 1)
+            .map_err(connection_error)?
+            .reply()
+            .map_err(reply_error)?;
+        let id = connection
+            .generate_id()
+            .map_err(|error| X11Error::Protocol(error.to_string()))?;
+        connection
+            .damage_create(id, root, damage::ReportLevel::NON_EMPTY)
+            .map_err(connection_error)?
+            .check()
+            .map_err(reply_error)?;
+        connection.flush().map_err(connection_error)?;
+        Ok(Some(Self {
+            id,
+            first_frame: true,
+        }))
+    }
+
+    fn take(&mut self, connection: &RustConnection) -> Result<bool, X11Error> {
+        let mut damaged = std::mem::take(&mut self.first_frame);
+        while let Some(event) = connection.poll_for_event().map_err(connection_error)? {
+            if matches!(event, Event::DamageNotify(ref notify) if notify.damage == self.id) {
+                damaged = true;
+            }
+        }
+        if damaged {
+            connection
+                .damage_subtract(self.id, x11rb::NONE, x11rb::NONE)
+                .map_err(connection_error)?
+                .check()
+                .map_err(reply_error)?;
+            connection.flush().map_err(connection_error)?;
+        }
+        Ok(damaged)
+    }
+}
+
+struct ShmCapture {
+    segment: shm::Seg,
+    mapping: MmapMut,
+    scanline_pad: ScanlinePad,
+    bits_per_pixel: BitsPerPixel,
+    byte_order: ImageOrder,
+}
+
+impl ShmCapture {
+    fn try_new(
+        connection: &RustConnection,
+        width: u16,
+        height: u16,
+        depth: u8,
+    ) -> Result<Option<Self>, X11Error> {
+        if connection
+            .extension_information(shm::X11_EXTENSION_NAME)
+            .map_err(connection_error)?
+            .is_none()
+        {
+            return Ok(None);
+        }
+        let version = connection
+            .shm_query_version()
+            .map_err(connection_error)?
+            .reply()
+            .map_err(reply_error)?;
+        if version.major_version < 1 || (version.major_version == 1 && version.minor_version < 2) {
+            return Ok(None);
+        }
+
+        let template = Image::allocate_native(width, height, depth, connection.setup())
+            .map_err(|error| X11Error::Capture(error.to_string()))?;
+        let byte_length = template.data().len();
+        let segment = connection
+            .generate_id()
+            .map_err(|error| X11Error::Protocol(error.to_string()))?;
+        let reply = connection
+            .shm_create_segment(
+                segment,
+                u32::try_from(byte_length).map_err(|_| X11Error::SharedImageTooLarge)?,
+                false,
+            )
+            .map_err(connection_error)?
+            .reply()
+            .map_err(reply_error)?;
+        let file: File = reply.shm_fd.into();
+        // SAFETY: The X server created this file descriptor with exactly byte_length
+        // bytes for this client, and the mapping does not outlive the owned X11 display.
+        let mapping = unsafe { MmapOptions::new().len(byte_length).map_mut(&file) }
+            .map_err(|error| X11Error::SharedMemoryMap(error.to_string()))?;
+
+        Ok(Some(Self {
+            segment,
+            mapping,
+            scanline_pad: template.scanline_pad(),
+            bits_per_pixel: template.bits_per_pixel(),
+            byte_order: template.byte_order(),
+        }))
+    }
+}
+
+fn frame_from_image(
+    image: &Image<'_>,
+    width: u16,
+    height: u16,
+    pixel_layout: PixelLayout,
+) -> Result<Frame, X11Error> {
+    let mut pixels = Vec::with_capacity(usize::from(width) * usize::from(height) * 3);
+    for y in 0..height {
+        for x in 0..width {
+            let (red, green, blue) = pixel_layout.decode(image.get_pixel(x, y));
+            pixels.extend_from_slice(&[(red >> 8) as u8, (green >> 8) as u8, (blue >> 8) as u8]);
+        }
+    }
+    Frame::new_rgb(u32::from(width), u32::from(height), pixels)
+        .map_err(|error| X11Error::Capture(error.to_string()))
+}
+
 struct KeyboardMap {
     minimum_keycode: u8,
     keysyms_per_keycode: usize,
@@ -363,6 +564,9 @@ pub enum X11Error {
     InvalidKeyboardMap,
     UnmappedKeysym(u32),
     InvalidPointerCoordinate,
+    SharedImageTooLarge,
+    SharedMemoryMap(String),
+    InvalidSharedImageSize { expected: usize, actual: usize },
     Protocol(String),
     Capture(String),
     WindowTimeout(Duration),
@@ -393,6 +597,14 @@ impl Display for X11Error {
             Self::InvalidPointerCoordinate => {
                 write!(formatter, "pointer coordinate exceeds X11 range")
             }
+            Self::SharedImageTooLarge => write!(formatter, "shared X11 image is too large"),
+            Self::SharedMemoryMap(message) => {
+                write!(formatter, "could not map X11 shared memory: {message}")
+            }
+            Self::InvalidSharedImageSize { expected, actual } => write!(
+                formatter,
+                "X11 shared image size is invalid: capacity {expected}, reply {actual}"
+            ),
             Self::Protocol(message) => write!(formatter, "X11 protocol error: {message}"),
             Self::Capture(message) => write!(formatter, "X11 frame capture failed: {message}"),
             Self::WindowTimeout(timeout) => write!(
