@@ -71,12 +71,15 @@ Kitty 호환 terminal에서의 GTK Demo 수동 조작 확인은 release checklis
 
 ## M4 — v0.1 hardening
 
-- [ ] `xeyes`, GTK Demo, Leafpad smoke test
-- [ ] terminal disconnect와 broken pipe test
-- [ ] child crash와 Xvfb crash test
-- [ ] frame allocation 상한과 fuzz 가능한 decoder 분리
-- [ ] 설치 문서와 demo 녹화
-- [ ] v0.1 release checklist
+- [x] `xeyes`, Xmessage, 사용 가능한 GTK editor smoke test harness
+- [x] terminal disconnect와 broken pipe test
+- [x] child crash와 Xvfb crash test
+- [x] frame allocation 상한과 fuzz 가능한 decoder 분리
+- [x] 설치 문서와 demo 절차
+- [x] v0.1 release checklist
+
+실제 Kitty/Ghostty/WezTerm 조작, GTK Demo/Leafpad가 설치된 환경의 확인, demo
+녹화는 [release checklist](release-checklist.md)의 수동 release gate입니다.
 
 ## v0.1 이후
 

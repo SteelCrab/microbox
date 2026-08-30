@@ -226,6 +226,9 @@ terminal resize 시에는 다음 순서를 사용합니다.
 - MIT-SHM capture 및 `GetImage` fallback
 - 64px dirty-tile overlay와 35% full-frame 임계값
 - `--fps` 및 `--stats` 성능 진단
+- 4096² frame allocation 상한
+- broken pipe, application crash, Xvfb crash 회귀 테스트
+- frame/input fuzz harness와 CI
 
 `run`의 native interactive 경로는 연결되었습니다. 현재 resize는 640×360 X
 framebuffer를 새 terminal cell 영역에 맞춰 표시하고 좌표를 다시 매핑합니다.

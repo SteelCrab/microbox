@@ -458,7 +458,9 @@ fn frame_from_image(
     height: u16,
     pixel_layout: PixelLayout,
 ) -> Result<Frame, X11Error> {
-    let mut pixels = Vec::with_capacity(usize::from(width) * usize::from(height) * 3);
+    let capacity = Frame::rgb_buffer_len(u32::from(width), u32::from(height))
+        .map_err(|error| X11Error::Capture(error.to_string()))?;
+    let mut pixels = Vec::with_capacity(capacity);
     for y in 0..height {
         for x in 0..width {
             let (red, green, blue) = pixel_layout.decode(image.get_pixel(x, y));

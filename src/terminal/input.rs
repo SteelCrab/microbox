@@ -79,10 +79,10 @@ pub fn poll_action(timeout: Duration, keyboard_enhanced: bool) -> io::Result<Vec
     if !event::poll(timeout)? {
         return Ok(Vec::new());
     }
-    Ok(decode_event(event::read()?, keyboard_enhanced))
+    Ok(decode_terminal_event(event::read()?, keyboard_enhanced))
 }
 
-fn decode_event(event: Event, keyboard_enhanced: bool) -> Vec<TerminalAction> {
+pub fn decode_terminal_event(event: Event, keyboard_enhanced: bool) -> Vec<TerminalAction> {
     match event {
         Event::Key(key_event) => {
             if key_event.code == KeyCode::Char('c')
@@ -216,7 +216,7 @@ mod tests {
 
     #[test]
     fn fallback_key_press_synthesizes_release() {
-        let actions = decode_event(
+        let actions = decode_terminal_event(
             Event::Key(CrosstermKeyEvent::new(
                 KeyCode::Char('a'),
                 KeyModifiers::NONE,
@@ -236,7 +236,7 @@ mod tests {
 
     #[test]
     fn control_c_is_reserved_for_session_exit() {
-        let actions = decode_event(
+        let actions = decode_terminal_event(
             Event::Key(CrosstermKeyEvent::new(
                 KeyCode::Char('c'),
                 KeyModifiers::CONTROL,
@@ -248,7 +248,7 @@ mod tests {
 
     #[test]
     fn mouse_coordinates_are_preserved_as_cells() {
-        let actions = decode_event(
+        let actions = decode_terminal_event(
             Event::Mouse(CrosstermMouseEvent {
                 kind: MouseEventKind::Down(CrosstermMouseButton::Left),
                 column: 12,

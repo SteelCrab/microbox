@@ -15,6 +15,7 @@ use crate::protocol::InputEvent;
 use crate::renderer::Frame;
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(3);
+const APPLICATION_WINDOW_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApplicationSpec {
@@ -137,6 +138,8 @@ impl NativeSession {
         command
             .args(spec.arguments())
             .env("DISPLAY", xvfb.display_name())
+            .env("GDK_BACKEND", "x11")
+            .env_remove("WAYLAND_DISPLAY")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -146,7 +149,7 @@ impl NativeSession {
                 message: error.to_string(),
             })?;
 
-        let window = match display.wait_for_application_window(STARTUP_TIMEOUT) {
+        let window = match display.wait_for_application_window(APPLICATION_WINDOW_TIMEOUT) {
             Ok(window) => window,
             Err(error) => {
                 let early_exit = application.child.try_wait().ok().flatten();
@@ -201,6 +204,16 @@ impl NativeSession {
     #[cfg(test)]
     fn pointer_position(&self) -> Result<(i16, i16), NativeError> {
         self.display.pointer_position().map_err(NativeError::X11)
+    }
+
+    #[cfg(test)]
+    fn kill_application(&mut self) {
+        self.application.terminate();
+    }
+
+    #[cfg(test)]
+    fn kill_xvfb(&mut self) {
+        self.xvfb._process.terminate();
     }
 }
 
@@ -310,6 +323,12 @@ mod tests {
 
     static XVFB_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    fn lock_xvfb() -> std::sync::MutexGuard<'static, ()> {
+        XVFB_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     #[test]
     fn rejects_empty_display_size_without_starting_xvfb() {
         assert!(matches!(
@@ -328,7 +347,7 @@ mod tests {
     #[test]
     #[ignore = "requires Xvfb and xeyes"]
     fn captures_xeyes_frame() {
-        let _test_lock = XVFB_TEST_LOCK.lock().unwrap();
+        let _test_lock = lock_xvfb();
         let spec = ApplicationSpec::new("xeyes", []);
         let mut session = NativeSession::start(&spec, 320, 180).unwrap();
         assert_eq!(session.capture_method(), "MIT-SHM");
@@ -349,10 +368,86 @@ mod tests {
 
     #[test]
     #[ignore = "requires Xvfb and xeyes"]
+    fn observes_application_crash_and_cleans_up() {
+        let _test_lock = lock_xvfb();
+        let spec = ApplicationSpec::new("xeyes", []);
+        let mut session = NativeSession::start(&spec, 320, 180).unwrap();
+        session.kill_application();
+        assert!(!session.is_running().unwrap());
+    }
+
+    #[test]
+    #[ignore = "requires Xvfb and xeyes"]
+    fn reports_xvfb_crash() {
+        let _test_lock = lock_xvfb();
+        let spec = ApplicationSpec::new("xeyes", []);
+        let mut session = NativeSession::start(&spec, 320, 180).unwrap();
+        session.kill_xvfb();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if session.capture().is_err() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "capture remained healthy after Xvfb termination"
+            );
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    #[test]
+    #[ignore = "requires Xvfb and mousepad"]
+    fn smoke_tests_mousepad() {
+        let _test_lock = lock_xvfb();
+        if !program_available("mousepad")
+            || std::env::var_os("MICRO_GUI_GTK_SMOKE").as_deref() != Some(OsStr::new("1"))
+        {
+            return;
+        }
+        let spec = ApplicationSpec::new("mousepad", [OsString::from("--disable-server")]);
+        assert_application_draws(spec);
+    }
+
+    #[test]
+    #[ignore = "requires Xvfb and xmessage"]
+    fn smoke_tests_xmessage() {
+        let _test_lock = lock_xvfb();
+        if !program_available("xmessage") {
+            return;
+        }
+        let spec = ApplicationSpec::new("xmessage", [OsString::from("micro-gui smoke test")]);
+        assert_application_draws(spec);
+    }
+
+    fn assert_application_draws(spec: ApplicationSpec) {
+        let mut session = NativeSession::start(&spec, 320, 180).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let frame = session.capture().unwrap();
+            if frame.pixels().iter().any(|&byte| byte != 0) {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "application did not draw a non-black frame"
+            );
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    fn program_available(program: &str) -> bool {
+        std::env::var_os("PATH").is_some_and(|path| {
+            std::env::split_paths(&path).any(|directory| directory.join(program).is_file())
+        })
+    }
+
+    #[test]
+    #[ignore = "requires Xvfb and xeyes"]
     fn injects_pointer_and_keyboard_events() {
         use crate::protocol::{KeyEvent, MouseEvent, MouseKind};
 
-        let _test_lock = XVFB_TEST_LOCK.lock().unwrap();
+        let _test_lock = lock_xvfb();
         let spec = ApplicationSpec::new("xeyes", []);
         let session = NativeSession::start(&spec, 320, 180).unwrap();
         session

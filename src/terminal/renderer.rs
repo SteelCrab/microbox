@@ -117,6 +117,25 @@ fn placement(rect: Rect, frame: &Frame, columns: u16, rows: u16) -> (u16, u16, u
 mod tests {
     use super::*;
 
+    struct BrokenPipeAfter {
+        remaining: usize,
+    }
+
+    impl Write for BrokenPipeAfter {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            if self.remaining == 0 {
+                return Err(io::Error::new(io::ErrorKind::BrokenPipe, "disconnected"));
+            }
+            let written = buffer.len().min(self.remaining);
+            self.remaining -= written;
+            Ok(written)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
     #[test]
     fn emits_full_then_nothing_then_a_positioned_tile() {
         let before = Frame::new_rgb(256, 128, vec![0; 256 * 128 * 3]).unwrap();
@@ -134,5 +153,13 @@ mod tests {
         let output = String::from_utf8(renderer.into_inner()).unwrap();
         assert!(output.contains("i=1"));
         assert!(output.contains("\x1b[1;1H\x1b_Ga=T,f=24,s=64,v=64,i=2"));
+    }
+
+    #[test]
+    fn reports_terminal_disconnect_as_broken_pipe() {
+        let frame = Frame::new_rgb(32, 32, vec![0; 32 * 32 * 3]).unwrap();
+        let mut renderer = KittyFrameRenderer::new(BrokenPipeAfter { remaining: 100 }, 80, 24);
+        let error = renderer.render(&frame).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
     }
 }

@@ -86,6 +86,8 @@ See [the v0.1 architecture](docs/architecture-v0.1.md) and
 [the implementation roadmap](docs/roadmap.md) for the concrete design and
 acceptance criteria.
 
+Build and system requirements are covered by [the installation guide](docs/install.md).
+
 ## Project principles
 
 - Application runtime, not a desktop environment

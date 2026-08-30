@@ -1,6 +1,8 @@
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
+pub const MAX_FRAME_PIXELS: u64 = 4096 * 4096;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rect {
     pub x: u32,
@@ -18,7 +20,7 @@ pub struct Frame {
 
 impl Frame {
     pub fn new_rgb(width: u32, height: u32, pixels: Vec<u8>) -> Result<Self, FrameError> {
-        let expected = pixel_bytes(width, height).ok_or(FrameError::DimensionsOverflow)?;
+        let expected = Self::rgb_buffer_len(width, height)?;
         if pixels.len() != expected {
             return Err(FrameError::InvalidBufferLength {
                 expected,
@@ -37,7 +39,8 @@ impl Frame {
         height: u32,
         mut pixel: impl FnMut(u32, u32) -> [u8; 3],
     ) -> Self {
-        let capacity = pixel_bytes(width, height).expect("frame dimensions overflow");
+        let capacity = Self::rgb_buffer_len(width, height)
+            .expect("generated frame dimensions must be within the supported limit");
         let mut pixels = Vec::with_capacity(capacity);
         for y in 0..height {
             for x in 0..width {
@@ -61,6 +64,23 @@ impl Frame {
 
     pub fn pixels(&self) -> &[u8] {
         &self.pixels
+    }
+
+    pub fn rgb_buffer_len(width: u32, height: u32) -> Result<usize, FrameError> {
+        if width == 0 || height == 0 {
+            return Err(FrameError::InvalidDimensions { width, height });
+        }
+        let pixel_count = u64::from(width)
+            .checked_mul(u64::from(height))
+            .ok_or(FrameError::DimensionsOverflow)?;
+        if pixel_count > MAX_FRAME_PIXELS {
+            return Err(FrameError::FrameTooLarge {
+                width,
+                height,
+                maximum_pixels: MAX_FRAME_PIXELS,
+            });
+        }
+        pixel_bytes(width, height).ok_or(FrameError::DimensionsOverflow)
     }
 
     pub fn crop(&self, rect: Rect) -> Result<Self, FrameError> {
@@ -135,7 +155,19 @@ fn pixel_bytes(width: u32, height: u32) -> Option<usize> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FrameError {
     DimensionsOverflow,
-    InvalidBufferLength { expected: usize, actual: usize },
+    InvalidDimensions {
+        width: u32,
+        height: u32,
+    },
+    FrameTooLarge {
+        width: u32,
+        height: u32,
+        maximum_pixels: u64,
+    },
+    InvalidBufferLength {
+        expected: usize,
+        actual: usize,
+    },
     InvalidCrop(Rect),
 }
 
@@ -143,6 +175,20 @@ impl Display for FrameError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::DimensionsOverflow => write!(formatter, "frame dimensions overflow"),
+            Self::InvalidDimensions { width, height } => {
+                write!(
+                    formatter,
+                    "frame dimensions must be non-zero, got {width}x{height}"
+                )
+            }
+            Self::FrameTooLarge {
+                width,
+                height,
+                maximum_pixels,
+            } => write!(
+                formatter,
+                "frame {width}x{height} exceeds the {maximum_pixels}-pixel limit"
+            ),
             Self::InvalidBufferLength { expected, actual } => write!(
                 formatter,
                 "invalid RGB buffer length: expected {expected} bytes, got {actual}"
@@ -167,6 +213,18 @@ mod tests {
                 actual: 5,
             }
         );
+    }
+
+    #[test]
+    fn rejects_empty_and_oversized_frames_before_buffer_access() {
+        assert!(matches!(
+            Frame::new_rgb(0, 10, Vec::new()),
+            Err(FrameError::InvalidDimensions { .. })
+        ));
+        assert!(matches!(
+            Frame::rgb_buffer_len(4097, 4096),
+            Err(FrameError::FrameTooLarge { .. })
+        ));
     }
 
     #[test]
