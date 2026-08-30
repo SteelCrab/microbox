@@ -257,7 +257,7 @@ fn run_application(options: RunOptions) -> Result<(), String> {
             ))
         }
         "oci" | "docker" | "oci-agent" => {
-            let spec = OciApplicationSpec::new(options.application, arguments);
+            let spec = OciApplicationSpec::new(options.application, arguments).with_debug(debug);
             let start = if options.runtime == "oci-agent" {
                 OciSession::start_agent
             } else {
@@ -343,10 +343,18 @@ fn run_application(options: RunOptions) -> Result<(), String> {
     let mut next_frame = Instant::now();
     let mut force_capture = true;
     let mut stats = RenderStats::default();
-    let render_result = (|| {
-        'session: while running.load(Ordering::SeqCst)
-            && session.is_running().map_err(|error| error.to_string())?
-        {
+    let render_result = (|| -> Result<SessionEnd, String> {
+        'session: loop {
+            if !running.load(Ordering::SeqCst) {
+                break 'session Ok(SessionEnd::HostSignal);
+            }
+            if !session.is_running().map_err(|error| error.to_string())? {
+                let backend_exit = session.termination()?.unwrap_or_else(|| BackendExit {
+                    success: None,
+                    message: "backend stopped without a termination reason".into(),
+                });
+                break 'session Ok(SessionEnd::Backend(backend_exit));
+            }
             let input_wait = next_frame
                 .saturating_duration_since(Instant::now())
                 .min(Duration::from_millis(20));
@@ -390,7 +398,7 @@ fn run_application(options: RunOptions) -> Result<(), String> {
                             next_frame = Instant::now();
                         }
                     }
-                    TerminalAction::Quit => break 'session,
+                    TerminalAction::Quit => break 'session Ok(SessionEnd::UserRequested),
                 }
             }
 
@@ -413,18 +421,36 @@ fn run_application(options: RunOptions) -> Result<(), String> {
                 thread::yield_now();
             }
         }
-        Ok(())
     })();
-    let _ = renderer.clear();
+    if debug {
+        for detail in session.debug_diagnostics() {
+            record_debug(debug, debug_started, &mut debug_events, detail);
+        }
+    }
+    let clear_result = renderer
+        .clear()
+        .map_err(|error| format!("terminal image cleanup failed: {error}"));
     drop(renderer);
     drop(terminal_guard);
+    let final_result = match (render_result, clear_result) {
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+        (Ok(SessionEnd::Backend(exit)), Ok(())) if exit.success == Some(false) => {
+            Err(format!("GUI backend failed: {}", exit.message))
+        }
+        (Ok(end), Ok(())) => Ok(end),
+    };
+    let finish_reason = match &final_result {
+        Ok(end) => end.description(),
+        Err(error) => format!("error: {error}"),
+    };
     record_debug(
         debug,
         debug_started,
         &mut debug_events,
         format!(
-            "session finished status={}",
-            if render_result.is_ok() { "ok" } else { "error" }
+            "session finished status={} reason={finish_reason:?}",
+            if final_result.is_ok() { "ok" } else { "error" }
         ),
     );
     if debug {
@@ -435,7 +461,7 @@ fn run_application(options: RunOptions) -> Result<(), String> {
     if options.stats || debug {
         eprintln!("{stats}");
     }
-    render_result
+    final_result.map(|_| ())
 }
 
 fn record_debug(enabled: bool, started: Instant, events: &mut Vec<String>, message: String) {
@@ -605,6 +631,37 @@ enum GuiSession {
     Firecrab(FirecrabSession),
 }
 
+#[derive(Debug)]
+struct BackendExit {
+    success: Option<bool>,
+    message: String,
+}
+
+#[derive(Debug)]
+enum SessionEnd {
+    UserRequested,
+    HostSignal,
+    Backend(BackendExit),
+}
+
+impl SessionEnd {
+    fn description(&self) -> String {
+        match self {
+            Self::UserRequested => "user requested stop with Ctrl-C".into(),
+            Self::HostSignal => "host received a termination signal".into(),
+            Self::Backend(exit) => format!(
+                "backend stopped outcome={} message={:?}",
+                match exit.success {
+                    Some(true) => "success",
+                    Some(false) => "failure",
+                    None => "unknown",
+                },
+                exit.message
+            ),
+        }
+    }
+}
+
 impl GuiSession {
     fn capture(&mut self) -> Result<Frame, String> {
         match self {
@@ -657,6 +714,40 @@ impl GuiSession {
             Self::Native(session) => session.is_running().map_err(|error| error.to_string()),
             Self::Oci(session) => session.is_running().map_err(|error| error.to_string()),
             Self::Firecrab(session) => session.is_running().map_err(|error| error.to_string()),
+        }
+    }
+
+    fn termination(&mut self) -> Result<Option<BackendExit>, String> {
+        let exit = match self {
+            Self::Native(session) => session
+                .application_status()
+                .map_err(|error| error.to_string())?
+                .map(|status| BackendExit {
+                    success: Some(status.success()),
+                    message: format!("native application exited with {status}"),
+                }),
+            Self::Oci(session) => session
+                .termination()
+                .map_err(|error| error.to_string())?
+                .map(|exit| BackendExit {
+                    success: exit.success,
+                    message: exit.message,
+                }),
+            Self::Firecrab(session) => session.termination().map(|exit| BackendExit {
+                success: exit.success,
+                message: exit.message.clone(),
+            }),
+        };
+        Ok(exit)
+    }
+
+    fn debug_diagnostics(&self) -> Vec<String> {
+        match self {
+            Self::Oci(session) => session.debug_diagnostics(),
+            Self::Native(_) => vec!["native backend diagnostics: no container".into()],
+            Self::Firecrab(session) => {
+                vec![format!("firecrab termination={:?}", session.termination())]
+            }
         }
     }
 }

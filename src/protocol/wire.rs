@@ -12,6 +12,7 @@ const HELLO: u8 = 1;
 const FRAME: u8 = 2;
 const EXIT: u8 = 3;
 const ERROR: u8 = 4;
+const EXIT_STATUS: u8 = 5;
 const AUTH: u8 = 10;
 const INPUT_KEY: u8 = 11;
 const INPUT_TEXT: u8 = 12;
@@ -23,8 +24,30 @@ const STOP: u8 = 15;
 pub enum AgentMessage {
     Hello { width: u16, height: u16 },
     Frame(Frame),
-    Exit(String),
+    Exit(AgentExit),
     Error(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentExit {
+    pub success: Option<bool>,
+    pub message: String,
+}
+
+impl AgentExit {
+    pub fn legacy(message: impl Into<String>) -> Self {
+        Self {
+            success: None,
+            message: message.into(),
+        }
+    }
+
+    pub fn status(success: bool, message: impl Into<String>) -> Self {
+        Self {
+            success: Some(success),
+            message: message.into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,7 +79,15 @@ pub fn write_agent_message(
             payload.extend_from_slice(frame.pixels());
             (FRAME, payload)
         }
-        AgentMessage::Exit(message) => (EXIT, message.as_bytes().to_vec()),
+        AgentMessage::Exit(exit) => match exit.success {
+            Some(success) => {
+                let mut payload = Vec::with_capacity(1 + exit.message.len());
+                payload.push(u8::from(success));
+                payload.extend_from_slice(exit.message.as_bytes());
+                (EXIT_STATUS, payload)
+            }
+            None => (EXIT, exit.message.as_bytes().to_vec()),
+        },
         AgentMessage::Error(message) => (ERROR, message.as_bytes().to_vec()),
     };
     write_packet(writer, kind, &payload)
@@ -183,7 +214,10 @@ impl WireDecoder {
                         .map_err(|error| WireError::InvalidMessage(error.to_string()))?,
                 )
             }
-            EXIT => AgentMessage::Exit(decode_text(payload)?),
+            EXIT => AgentMessage::Exit(AgentExit::legacy(decode_text(payload)?)),
+            EXIT_STATUS if !payload.is_empty() && payload[0] <= 1 => AgentMessage::Exit(
+                AgentExit::status(payload[0] == 1, decode_text(payload[1..].to_vec())?),
+            ),
             ERROR => AgentMessage::Error(decode_text(payload)?),
             _ => {
                 return Err(WireError::InvalidMessage(format!(
@@ -308,6 +342,26 @@ mod tests {
             decoder.next_agent().unwrap(),
             Some(AgentMessage::Frame(frame))
         );
+    }
+
+    #[test]
+    fn round_trips_structured_and_legacy_exit_messages() {
+        let messages = [
+            AgentMessage::Exit(AgentExit::status(
+                false,
+                "application terminated by signal 11",
+            )),
+            AgentMessage::Exit(AgentExit::legacy("application exited")),
+        ];
+        let mut bytes = Vec::new();
+        for message in &messages {
+            write_agent_message(&mut bytes, message).unwrap();
+        }
+        let mut decoder = WireDecoder::default();
+        decoder.push(&bytes).unwrap();
+        for expected in messages {
+            assert_eq!(decoder.next_agent().unwrap(), Some(expected));
+        }
     }
 
     #[test]

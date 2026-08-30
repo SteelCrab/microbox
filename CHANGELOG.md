@@ -18,6 +18,10 @@
   XRandR resize propagation through native, OCI, and Firecrab sessions.
 - Opt-in `--debug`/`MICROBOX_DEBUG` session tracing for platform, runtime,
   geometry, lifecycle, resize, and rendering diagnostics without token output.
+- Preserve structured guest application exit outcomes across the agent protocol,
+  distinguish user, signal, backend, agent-error, and unexpected transport
+  termination, and include bounded Docker state and container logs in OCI debug
+  output before deterministic cleanup.
 - Runtime diagnostics, FPS control, render statistics, smoke tests, and fuzz harness.
 - Docker-backed OCI sessions with automatic image-reference detection, private
   X11 socket sharing, missing-image pulls, and deterministic container cleanup.

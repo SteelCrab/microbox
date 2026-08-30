@@ -3,12 +3,15 @@ use std::ffi::OsString;
 use std::fmt::{self, Display, Formatter};
 use std::io::{self, Read};
 use std::net::{TcpListener, TcpStream};
+use std::os::unix::process::ExitStatusExt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::protocol::{AgentMessage, ClientMessage, WireDecoder, WireError, write_agent_message};
+use crate::protocol::{
+    AgentExit, AgentMessage, ClientMessage, WireDecoder, WireError, write_agent_message,
+};
 
 use super::{ApplicationSpec, NativeError, NativeSession};
 
@@ -24,30 +27,60 @@ pub struct AgentConfig {
 }
 
 pub fn run_agent(config: AgentConfig) -> Result<(), AgentError> {
+    let debug = AgentDebug::detect();
     if config.token.is_empty() || config.token.len() > 4096 {
         return Err(AgentError::InvalidToken);
     }
     if !(1..=60).contains(&config.fps) {
         return Err(AgentError::InvalidFps(config.fps));
     }
+    debug.log(format!("listening address={}", config.listen));
     let listener = TcpListener::bind(&config.listen).map_err(AgentError::Listen)?;
-    let (mut stream, _) = listener.accept().map_err(AgentError::Accept)?;
+    let (mut stream, peer) = listener.accept().map_err(AgentError::Accept)?;
+    debug.log(format!("client accepted peer={peer}"));
+    match run_connected_agent(&config, &mut stream, &debug) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            debug.log(format!("failed error={error}"));
+            let _ = write_agent_message(&mut stream, &AgentMessage::Error(error.to_string()));
+            Err(error)
+        }
+    }
+}
+
+fn run_connected_agent(
+    config: &AgentConfig,
+    stream: &mut TcpStream,
+    debug: &AgentDebug,
+) -> Result<(), AgentError> {
     stream.set_nodelay(true).map_err(AgentError::Io)?;
     stream
         .set_read_timeout(Some(AUTH_TIMEOUT))
         .map_err(AgentError::Io)?;
-    let (width, height) = authenticate(&mut stream, &config.token)?;
+    let (width, height) = authenticate(stream, &config.token)?;
+    debug.log(format!("authenticated display={width}x{height}"));
     if width == 0 || height == 0 || width > 4096 || height > 4096 {
         return Err(AgentError::InvalidDisplaySize { width, height });
     }
-    let spec = ApplicationSpec::new(config.application, config.arguments);
+    let spec = ApplicationSpec::new(config.application.clone(), config.arguments.clone());
+    debug.log(format!(
+        "starting application={:?} arguments={:?}",
+        config.application, config.arguments
+    ));
     let mut session = NativeSession::start(&spec, width, height)?;
+    debug.log(format!(
+        "application ready display={}x{} capture={}",
+        session.display_size().0,
+        session.display_size().1,
+        session.capture_method()
+    ));
 
     let (width, height) = session.display_size();
-    write_agent_message(&mut stream, &AgentMessage::Hello { width, height })?;
+    write_agent_message(stream, &AgentMessage::Hello { width, height })?;
     let _ = session.frame_pending()?;
     let initial = session.capture()?;
-    write_agent_message(&mut stream, &AgentMessage::Frame(initial))?;
+    write_agent_message(stream, &AgentMessage::Frame(initial))?;
+    debug.log("initial frame sent".into());
     stream.set_read_timeout(None).map_err(AgentError::Io)?;
     stream.set_nonblocking(true).map_err(AgentError::Io)?;
     stream
@@ -64,10 +97,29 @@ pub fn run_agent(config: AgentConfig) -> Result<(), AgentError> {
     let mut bytes = [0; 64 * 1024];
     let mut force_frame = false;
 
-    while running.load(Ordering::SeqCst) && session.is_running()? {
+    loop {
+        if !running.load(Ordering::SeqCst) {
+            let exit = AgentExit::status(true, "agent received a termination signal");
+            debug.log(format!("stopping reason={:?}", exit.message));
+            write_agent_message(stream, &AgentMessage::Exit(exit))?;
+            return Ok(());
+        }
+        if let Some(status) = session.application_status()? {
+            let message = describe_application_exit(&config.application, status);
+            let success = status.success();
+            debug.log(format!("stopping success={success} reason={message:?}"));
+            write_agent_message(
+                stream,
+                &AgentMessage::Exit(AgentExit::status(success, message)),
+            )?;
+            return Ok(());
+        }
         loop {
             match stream.read(&mut bytes) {
-                Ok(0) => return Ok(()),
+                Ok(0) => {
+                    debug.log("client transport closed".into());
+                    return Ok(());
+                }
                 Ok(count) => decoder.push(&bytes[..count])?,
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
                 Err(error) => return Err(AgentError::Io(error)),
@@ -76,18 +128,24 @@ pub fn run_agent(config: AgentConfig) -> Result<(), AgentError> {
         while let Some(message) = decoder.next_client()? {
             match message {
                 ClientMessage::Input(crate::protocol::InputEvent::Resize { width, height }) => {
+                    debug.log(format!("resize requested display={width}x{height}"));
                     session.resize(width, height)?;
                     force_frame = true;
                 }
                 ClientMessage::Input(input) => session.inject(&input)?,
-                ClientMessage::Stop => return Ok(()),
+                ClientMessage::Stop => {
+                    let exit = AgentExit::status(true, "client requested stop");
+                    debug.log(format!("stopping reason={:?}", exit.message));
+                    write_agent_message(stream, &AgentMessage::Exit(exit))?;
+                    return Ok(());
+                }
                 ClientMessage::Authenticate { .. } => return Err(AgentError::DuplicateAuth),
             }
         }
         if Instant::now() >= next_frame {
             let damaged = session.frame_pending()?;
             if force_frame || damaged {
-                write_agent_message(&mut stream, &AgentMessage::Frame(session.capture()?))?;
+                write_agent_message(stream, &AgentMessage::Frame(session.capture()?))?;
                 force_frame = false;
             }
             next_frame = Instant::now() + interval;
@@ -99,11 +157,48 @@ pub fn run_agent(config: AgentConfig) -> Result<(), AgentError> {
             );
         }
     }
-    let _ = write_agent_message(
-        &mut stream,
-        &AgentMessage::Exit("application exited".into()),
-    );
-    Ok(())
+}
+
+fn describe_application_exit(
+    application: &std::ffi::OsStr,
+    status: std::process::ExitStatus,
+) -> String {
+    let application = application.to_string_lossy();
+    if let Some(code) = status.code() {
+        return format!("application {application:?} exited with code {code}");
+    }
+    if let Some(signal) = status.signal() {
+        let core = if status.core_dumped() {
+            " (core dumped)"
+        } else {
+            ""
+        };
+        return format!("application {application:?} terminated by signal {signal}{core}");
+    }
+    format!("application {application:?} exited with unknown status {status}")
+}
+
+struct AgentDebug {
+    enabled: bool,
+    started: Instant,
+}
+
+impl AgentDebug {
+    fn detect() -> Self {
+        Self {
+            enabled: std::env::var_os("MICROBOX_DEBUG").is_some(),
+            started: Instant::now(),
+        }
+    }
+
+    fn log(&self, message: String) {
+        if self.enabled {
+            eprintln!(
+                "microbox agent debug: +{:>6}ms {message}",
+                self.started.elapsed().as_millis()
+            );
+        }
+    }
 }
 
 fn authenticate(stream: &mut TcpStream, expected: &str) -> Result<(u16, u16), AgentError> {
@@ -187,7 +282,16 @@ impl Display for AgentError {
     }
 }
 
-impl Error for AgentError {}
+impl Error for AgentError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Listen(error) | Self::Accept(error) | Self::Io(error) => Some(error),
+            Self::Wire(error) => Some(error),
+            Self::Native(error) => Some(error),
+            _ => None,
+        }
+    }
+}
 
 impl From<WireError> for AgentError {
     fn from(error: WireError) -> Self {
@@ -204,11 +308,30 @@ impl From<NativeError> for AgentError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
 
     #[test]
     fn token_comparison_handles_different_lengths() {
         assert!(constant_time_eq("secret", "secret"));
         assert!(!constant_time_eq("secret", "secrex"));
         assert!(!constant_time_eq("secret", "secret-long"));
+    }
+
+    #[test]
+    fn describes_application_exit_codes_and_signals() {
+        let code = Command::new("sh").args(["-c", "exit 7"]).status().unwrap();
+        assert_eq!(
+            describe_application_exit(std::ffi::OsStr::new("test-app"), code),
+            "application \"test-app\" exited with code 7"
+        );
+
+        let signal = Command::new("sh")
+            .args(["-c", "kill -TERM $$"])
+            .status()
+            .unwrap();
+        assert_eq!(
+            describe_application_exit(std::ffi::OsStr::new("test-app"), signal),
+            "application \"test-app\" terminated by signal 15"
+        );
     }
 }

@@ -233,6 +233,12 @@ every dynamic resize, final status, and render counters. The trace never prints
 the OCI/Firecrab authentication token. `MICROBOX_DEBUG=1` enables the same mode
 when changing a command line is inconvenient:
 
+For OCI agent sessions, the trace also reports the guest application's exit
+code or signal, unexpected transport closure, Docker container state, exit
+code, OOM status, timestamps, and the last 200 bounded container log lines.
+Control characters are stripped and authentication tokens are not logged. The
+container is still removed automatically after diagnostics are collected.
+
 ```sh
 MICROBOX_DEBUG=1 microbox run microbox/xeyes-agent --runtime oci
 ```

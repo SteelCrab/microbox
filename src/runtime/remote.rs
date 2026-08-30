@@ -5,7 +5,8 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::time::{Duration, Instant};
 
 use crate::protocol::{
-    AgentMessage, ClientMessage, InputEvent, WireDecoder, WireError, write_client_message,
+    AgentExit, AgentMessage, ClientMessage, InputEvent, WireDecoder, WireError,
+    write_client_message,
 };
 use crate::renderer::Frame;
 
@@ -18,6 +19,7 @@ pub struct FirecrabSession {
     latest: Frame,
     pending: bool,
     running: bool,
+    termination: Option<AgentExit>,
     width: u16,
     height: u16,
 }
@@ -88,9 +90,10 @@ impl FirecrabSession {
                     dimensions = Some((width, height));
                 }
                 AgentMessage::Frame(frame) => initial_frame = Some(frame),
-                AgentMessage::Error(message) | AgentMessage::Exit(message) => {
+                AgentMessage::Error(message) => {
                     return Err(FirecrabError::Agent(message));
                 }
+                AgentMessage::Exit(exit) => return Err(FirecrabError::Agent(exit.message)),
                 AgentMessage::Hello { .. } => {
                     return Err(FirecrabError::Protocol("zero-sized display".into()));
                 }
@@ -120,6 +123,7 @@ impl FirecrabSession {
             latest,
             pending: true,
             running: true,
+            termination: None,
             width,
             height,
         })
@@ -162,7 +166,14 @@ impl FirecrabSession {
                 return Ok(());
             }
             if !self.running {
-                return Err(FirecrabError::Agent("agent exited while resizing".into()));
+                let reason = self
+                    .termination
+                    .as_ref()
+                    .map(|exit| exit.message.as_str())
+                    .unwrap_or("no termination reason was provided");
+                return Err(FirecrabError::Agent(format!(
+                    "agent exited while resizing: {reason}"
+                )));
             }
             std::thread::sleep(Duration::from_millis(5));
         }
@@ -174,12 +185,17 @@ impl FirecrabSession {
         Ok(self.running)
     }
 
+    pub fn termination(&self) -> Option<&AgentExit> {
+        self.termination.as_ref()
+    }
+
     fn poll_messages(&mut self) -> Result<(), FirecrabError> {
         let mut bytes = [0; 64 * 1024];
+        let mut end_of_stream = false;
         loop {
             match self.reader.read(&mut bytes) {
                 Ok(0) => {
-                    self.running = false;
+                    end_of_stream = true;
                     break;
                 }
                 Ok(count) => self.decoder.push(&bytes[..count])?,
@@ -198,11 +214,27 @@ impl FirecrabSession {
                     self.latest = frame;
                     self.pending = true;
                 }
-                AgentMessage::Exit(_) => self.running = false,
-                AgentMessage::Error(message) => return Err(FirecrabError::Agent(message)),
+                AgentMessage::Exit(exit) => {
+                    self.termination = Some(exit);
+                    self.running = false;
+                }
+                AgentMessage::Error(message) => {
+                    self.termination = Some(AgentExit::status(false, message.clone()));
+                    self.running = false;
+                    return Err(FirecrabError::Agent(message));
+                }
                 AgentMessage::Hello { .. } => {
                     return Err(FirecrabError::Protocol("duplicate hello".into()));
                 }
+            }
+        }
+        if end_of_stream {
+            self.running = false;
+            if self.termination.is_none() {
+                self.termination = Some(AgentExit::status(
+                    false,
+                    "agent transport closed without an exit status",
+                ));
             }
         }
         Ok(())
@@ -211,7 +243,9 @@ impl FirecrabSession {
 
 impl Drop for FirecrabSession {
     fn drop(&mut self) {
-        let _ = write_client_message(&mut self.writer, &ClientMessage::Stop);
+        if self.running {
+            let _ = write_client_message(&mut self.writer, &ClientMessage::Stop);
+        }
     }
 }
 
@@ -379,5 +413,80 @@ mod tests {
             FirecrabSession::connect("invalid endpoint", "token", 1, 1),
             Err(FirecrabError::Endpoint(_))
         ));
+    }
+
+    #[test]
+    fn preserves_structured_agent_exit_status() {
+        let (mut session, agent) = connected_test_session(|mut stream| {
+            write_agent_message(
+                &mut stream,
+                &AgentMessage::Exit(AgentExit::status(
+                    false,
+                    "application terminated by signal 11",
+                )),
+            )
+            .unwrap();
+        });
+        agent.join().unwrap();
+
+        assert!(!session.is_running().unwrap());
+        assert_eq!(
+            session.termination(),
+            Some(&AgentExit::status(
+                false,
+                "application terminated by signal 11"
+            ))
+        );
+    }
+
+    #[test]
+    fn reports_transport_close_without_exit_status() {
+        let (mut session, agent) = connected_test_session(drop);
+        agent.join().unwrap();
+
+        assert!(!session.is_running().unwrap());
+        assert_eq!(session.termination().unwrap().success, Some(false));
+        assert_eq!(
+            session.termination().unwrap().message,
+            "agent transport closed without an exit status"
+        );
+    }
+
+    fn connected_test_session(
+        finish: impl FnOnce(TcpStream) + Send + 'static,
+    ) -> (FirecrabSession, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = listener.local_addr().unwrap();
+        let agent = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut decoder = WireDecoder::default();
+            let mut bytes = [0; 4096];
+            loop {
+                let count = stream.read(&mut bytes).unwrap();
+                decoder.push(&bytes[..count]).unwrap();
+                if matches!(
+                    decoder.next_client().unwrap(),
+                    Some(ClientMessage::Authenticate { .. })
+                ) {
+                    break;
+                }
+            }
+            write_agent_message(
+                &mut stream,
+                &AgentMessage::Hello {
+                    width: 2,
+                    height: 1,
+                },
+            )
+            .unwrap();
+            write_agent_message(
+                &mut stream,
+                &AgentMessage::Frame(Frame::new_rgb(2, 1, vec![0; 6]).unwrap()),
+            )
+            .unwrap();
+            finish(stream);
+        });
+        let session = FirecrabSession::connect(&endpoint.to_string(), "token", 2, 1).unwrap();
+        (session, agent)
     }
 }

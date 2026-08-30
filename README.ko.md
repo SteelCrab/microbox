@@ -208,6 +208,11 @@ microbox run xeyes --debug
 초기 display 크기, 세션 ID/PID, 모든 동적 리사이즈, 최종 상태와 렌더 통계를
 출력합니다. OCI/Firecrab 인증 토큰은 출력하지 않습니다.
 
+OCI agent 세션에서는 guest 애플리케이션의 exit code 또는 signal, 예상하지 못한
+TCP 단절, Docker 컨테이너 상태·exit code·OOM 여부·시각, 마지막 200줄의 제한된
+container log도 출력합니다. 로그의 제어 문자는 제거되며 인증 토큰은 기록하지
+않습니다. 진단을 수집한 뒤 컨테이너는 기존과 같이 자동 제거됩니다.
+
 ```sh
 MICROBOX_DEBUG=1 microbox run microbox/xeyes-agent --runtime oci
 ```

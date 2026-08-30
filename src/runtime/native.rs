@@ -2,7 +2,7 @@ use std::error::Error;
 use std::ffi::{OsStr, OsString};
 use std::fmt::{self, Display, Formatter};
 use std::io::{BufRead, BufReader};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -219,10 +219,12 @@ impl NativeSession {
     }
 
     pub fn is_running(&mut self) -> Result<bool, NativeError> {
+        self.application_status().map(|status| status.is_none())
+    }
+
+    pub fn application_status(&mut self) -> Result<Option<ExitStatus>, NativeError> {
         self.application
-            .child
-            .try_wait()
-            .map(|status| status.is_none())
+            .status()
             .map_err(|error| NativeError::ApplicationStatus(error.to_string()))
     }
 
@@ -284,6 +286,7 @@ fn connect_with_retry(display_name: &str, timeout: Duration) -> Result<X11Displa
 
 struct ManagedChild {
     child: Child,
+    status: Option<ExitStatus>,
 }
 
 impl ManagedChild {
@@ -291,15 +294,27 @@ impl ManagedChild {
         use std::os::unix::process::CommandExt;
 
         command.process_group(0);
-        command.spawn().map(|child| Self { child })
+        command.spawn().map(|child| Self {
+            child,
+            status: None,
+        })
+    }
+
+    fn status(&mut self) -> std::io::Result<Option<ExitStatus>> {
+        if self.status.is_none() {
+            self.status = self.child.try_wait()?;
+        }
+        Ok(self.status)
     }
 
     fn terminate(&mut self) {
-        if self.child.try_wait().ok().flatten().is_none() {
+        if self.status().ok().flatten().is_none() {
             let process_group = Pid::from_raw(self.child.id() as i32);
             let _ = killpg(process_group, Signal::SIGKILL);
         }
-        let _ = self.child.wait();
+        if self.status.is_none() {
+            self.status = self.child.wait().ok();
+        }
     }
 }
 
