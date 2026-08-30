@@ -118,6 +118,8 @@ MICROBOX_AGENT_TOKEN=RANDOM_SECRET \
 
 See [the Firecrab transport guide](docs/firecrab.md) for the agent image,
 authentication, port-forward configuration, and current control-plane boundary.
+The native, OCI, and Firecrab live-resize capture results are recorded in the
+[dynamic resolution validation report](docs/dynamic-resolution-validation.md).
 
 ## v0.1 scope
 
