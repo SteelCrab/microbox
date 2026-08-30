@@ -101,6 +101,7 @@ impl X11Display {
                 .map_err(connection_error)?
                 .reply()
                 .map_err(reply_error)?;
+            let mut largest: Option<(Window, u32)> = None;
             for &window in tree.children.iter().rev() {
                 let attributes = self
                     .connection
@@ -108,9 +109,22 @@ impl X11Display {
                     .map_err(connection_error)?
                     .reply()
                     .map_err(reply_error)?;
-                if attributes.map_state == MapState::VIEWABLE {
-                    return Ok(window);
+                if attributes.map_state != MapState::VIEWABLE {
+                    continue;
                 }
+                let geometry = self
+                    .connection
+                    .get_geometry(window)
+                    .map_err(connection_error)?
+                    .reply()
+                    .map_err(reply_error)?;
+                let area = u32::from(geometry.width) * u32::from(geometry.height);
+                if area > largest.map_or(0, |(_, largest_area)| largest_area) {
+                    largest = Some((window, area));
+                }
+            }
+            if let Some((window, _)) = largest {
+                return Ok(window);
             }
 
             if Instant::now() >= deadline {

@@ -408,6 +408,61 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires Xvfb"]
+    fn picks_the_largest_viewable_window_over_smaller_helper_windows() {
+        let _test_lock = lock_xvfb();
+        let xvfb = Xvfb::start(400, 300).unwrap();
+        let display = connect_with_retry(xvfb.display_name(), STARTUP_TIMEOUT).unwrap();
+
+        // Mirrors what Chrome does under a window-manager-less Xvfb: it maps
+        // several small helper/clipboard windows around the same time as its
+        // real, much larger browser window.
+        use x11rb::connection::Connection;
+        let (connection, screen_number) = x11rb::connect(Some(xvfb.display_name())).unwrap();
+        let root = connection.setup().roots[screen_number].root;
+        let _small = create_and_map_window(&connection, root, 1, 1);
+        let large = create_and_map_window(&connection, root, 200, 150);
+        let _other_small = create_and_map_window(&connection, root, 10, 10);
+        connection.flush().unwrap();
+
+        let window = display
+            .wait_for_application_window(Duration::from_secs(2))
+            .unwrap();
+        assert_eq!(window, large);
+    }
+
+    fn create_and_map_window(
+        connection: &x11rb::rust_connection::RustConnection,
+        parent: x11rb::protocol::xproto::Window,
+        width: u16,
+        height: u16,
+    ) -> x11rb::protocol::xproto::Window {
+        use x11rb::connection::Connection;
+        use x11rb::protocol::xproto::{ConnectionExt, CreateWindowAux, WindowClass};
+
+        let window = connection.generate_id().unwrap();
+        connection
+            .create_window(
+                x11rb::COPY_DEPTH_FROM_PARENT,
+                window,
+                parent,
+                0,
+                0,
+                width,
+                height,
+                0,
+                WindowClass::INPUT_OUTPUT,
+                0,
+                &CreateWindowAux::new(),
+            )
+            .unwrap()
+            .check()
+            .unwrap();
+        connection.map_window(window).unwrap().check().unwrap();
+        window
+    }
+
+    #[test]
     fn application_spec_keeps_arguments_separate() {
         let spec = ApplicationSpec::new("viewer", [OsString::from("a file.png")]);
         assert_eq!(spec.program(), OsStr::new("viewer"));
