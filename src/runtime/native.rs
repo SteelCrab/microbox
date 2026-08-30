@@ -212,6 +212,15 @@ impl NativeSession {
             .resize(width, height)
             .map_err(NativeError::X11)?;
         let _ = self.display.frame_pending().map_err(NativeError::X11)?;
+        // The window captured at startup can have been destroyed and
+        // replaced since (apps like Chrome tear down and recreate
+        // top-level windows during their lifetime), which would make
+        // fill_screen() fail with BadWindow. Re-resolve the current one
+        // instead of trusting the cached handle.
+        self.application_window = self
+            .display
+            .wait_for_application_window(APPLICATION_REDRAW_TIMEOUT)
+            .map_err(NativeError::X11)?;
         self.display
             .fill_screen(self.application_window)
             .map_err(NativeError::X11)?;
@@ -429,6 +438,33 @@ mod tests {
             .wait_for_application_window(Duration::from_secs(2))
             .unwrap();
         assert_eq!(window, large);
+    }
+
+    #[test]
+    #[ignore = "requires Xvfb and xeyes"]
+    fn resize_re_resolves_the_application_window_instead_of_trusting_a_stale_handle() {
+        let _test_lock = lock_xvfb();
+        let spec = ApplicationSpec::new("xeyes", []);
+        let mut session = NativeSession::start(&spec, 320, 180).unwrap();
+        let original_window = session.application_window;
+
+        // Simulate an app that has torn down and recreated its top-level
+        // window since startup (Chrome does this): a new, larger window
+        // appears alongside the one picked at startup. A resize() that
+        // still trusted the cached handle would eventually hit BadWindow
+        // once the original window is gone; it should instead pick up
+        // whichever window is current.
+        use x11rb::connection::Connection;
+        let (connection, screen_number) =
+            x11rb::connect(Some(session.xvfb.display_name())).unwrap();
+        let root = connection.setup().roots[screen_number].root;
+        let replacement = create_and_map_window(&connection, root, 500, 400);
+        connection.flush().unwrap();
+
+        session.resize(500, 400).unwrap();
+
+        assert_eq!(session.application_window, replacement);
+        assert_ne!(session.application_window, original_window);
     }
 
     fn create_and_map_window(
