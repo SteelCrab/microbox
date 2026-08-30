@@ -83,9 +83,6 @@ fn run_connected_agent(
     debug.log("initial frame sent".into());
     stream.set_read_timeout(None).map_err(AgentError::Io)?;
     stream.set_nonblocking(true).map_err(AgentError::Io)?;
-    stream
-        .set_write_timeout(Some(Duration::from_secs(2)))
-        .map_err(AgentError::Io)?;
 
     let running = Arc::new(AtomicBool::new(true));
     let signal_flag = Arc::clone(&running);

@@ -1,12 +1,23 @@
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::io::{self, Write};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use crate::protocol::{InputEvent, KeyEvent, MouseButton, MouseEvent, MouseKind};
 use crate::renderer::Frame;
 
 pub const DEFAULT_AGENT_PORT: u16 = 5943;
 pub const MAX_WIRE_PAYLOAD: usize = 64 * 1024 * 1024;
+
+// A frame write can be several MB, far larger than a typical OS socket send
+// buffer. On a nonblocking stream (used so reads can be polled without
+// stalling), write() returns WouldBlock as soon as the buffer is full rather
+// than waiting for the peer to drain it. write_all() treats that as a hard
+// error, so a slow-draining peer used to kill the whole connection. Retry
+// instead, bounded by this deadline.
+const WRITE_RETRY_TIMEOUT: Duration = Duration::from_secs(2);
+const WRITE_RETRY_INTERVAL: Duration = Duration::from_millis(5);
 
 const HELLO: u8 = 1;
 const FRAME: u8 = 2;
@@ -155,11 +166,44 @@ fn write_packet(writer: &mut impl Write, kind: u8, payload: &[u8]) -> Result<(),
     if payload.len() > MAX_WIRE_PAYLOAD || payload.len() > u32::MAX as usize {
         return Err(WireError::PayloadTooLarge(payload.len()));
     }
-    writer.write_all(&[kind]).map_err(WireError::Io)?;
-    writer
-        .write_all(&(payload.len() as u32).to_be_bytes())
-        .map_err(WireError::Io)?;
-    writer.write_all(payload).map_err(WireError::Io)
+    write_all_retrying(writer, &[kind]).map_err(WireError::Io)?;
+    write_all_retrying(writer, &(payload.len() as u32).to_be_bytes()).map_err(WireError::Io)?;
+    write_all_retrying(writer, payload).map_err(WireError::Io)
+}
+
+fn write_all_retrying(writer: &mut impl Write, buffer: &[u8]) -> io::Result<()> {
+    write_all_retrying_with_deadline(writer, buffer, WRITE_RETRY_TIMEOUT)
+}
+
+fn write_all_retrying_with_deadline(
+    writer: &mut impl Write,
+    mut buffer: &[u8],
+    deadline: Duration,
+) -> io::Result<()> {
+    let start = Instant::now();
+    while !buffer.is_empty() {
+        match writer.write(buffer) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "failed to write whole wire packet",
+                ));
+            }
+            Ok(count) => buffer = &buffer[count..],
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                if start.elapsed() >= deadline {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "timed out writing wire packet: peer is not draining fast enough",
+                    ));
+                }
+                thread::sleep(WRITE_RETRY_INTERVAL);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
 
 #[derive(Default)]
@@ -401,6 +445,63 @@ mod tests {
         for expected in messages {
             assert_eq!(decoder.next_client().unwrap(), Some(expected));
         }
+    }
+
+    #[test]
+    fn write_packet_retries_past_a_transient_would_block_instead_of_failing() {
+        use std::io::Read;
+        use std::net::{TcpListener, TcpStream};
+        use std::thread;
+        use std::time::Duration;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut writer = TcpStream::connect(addr).unwrap();
+        writer.set_nonblocking(true).unwrap();
+        let (mut reader, _) = listener.accept().unwrap();
+
+        // Don't drain immediately, so the writer's socket send buffer fills up and
+        // a naive write_all() hits WouldBlock (this is what previously crashed a
+        // GUI agent mid-session: os error 11 on the first frame after the initial one).
+        let drain = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(200));
+            let mut sink = Vec::new();
+            reader.read_to_end(&mut sink).unwrap();
+            sink.len()
+        });
+
+        // Bigger than the default Linux socket send buffer (a few hundred KB) so a
+        // single nonblocking write cannot possibly complete it in one syscall.
+        let payload = vec![7u8; 8 * 1024 * 1024];
+        write_packet(&mut writer, FRAME, &payload)
+            .expect("write_packet should retry through transient WouldBlock, not fail");
+        drop(writer);
+
+        let drained = drain.join().unwrap();
+        assert_eq!(drained, 1 + 4 + payload.len());
+    }
+
+    #[test]
+    fn write_all_retrying_times_out_when_the_peer_never_drains() {
+        use std::net::{TcpListener, TcpStream};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut writer = TcpStream::connect(addr).unwrap();
+        writer.set_nonblocking(true).unwrap();
+        let (_reader, _) = listener.accept().unwrap();
+
+        let payload = vec![7u8; 8 * 1024 * 1024];
+        let started = Instant::now();
+        let error =
+            write_all_retrying_with_deadline(&mut writer, &payload, Duration::from_millis(150))
+                .expect_err("write should give up once the peer stops draining");
+
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "should not hang"
+        );
     }
 
     #[test]

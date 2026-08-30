@@ -113,9 +113,6 @@ impl FirecrabSession {
             ));
         }
         reader.set_nonblocking(true).map_err(FirecrabError::Io)?;
-        writer
-            .set_write_timeout(Some(Duration::from_secs(2)))
-            .map_err(FirecrabError::Io)?;
         Ok(Self {
             reader,
             writer,
