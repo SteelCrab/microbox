@@ -6,9 +6,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use micro_gui::protocol::{InputEvent, ViewportMapping};
+use micro_gui::protocol::{DEFAULT_AGENT_PORT, InputEvent, ViewportMapping};
 use micro_gui::renderer::Frame;
-use micro_gui::runtime::{ApplicationSpec, NativeSession, OciApplicationSpec, OciSession};
+use micro_gui::runtime::{
+    AgentConfig, ApplicationSpec, FirecrabSession, NativeSession, OciApplicationSpec, OciSession,
+    run_agent,
+};
 use micro_gui::session::SessionRegistry;
 use micro_gui::terminal::{
     DemoOptions, DoctorReport, KittyFrameRenderer, RenderOutcome, TerminalAction, TerminalGuard,
@@ -21,6 +24,7 @@ Usage:
   micro-gui doctor
   micro-gui demo [--width PIXELS] [--height PIXELS]
   micro-gui run <APPLICATION|OCI_IMAGE> [--runtime native|oci|firecrab] [--fps 1..60] [--stats] [-- ARGS...]
+  micro-gui agent <APPLICATION> [--listen ADDRESS] [--fps 1..60] [-- ARGS...]
   micro-gui ps
   micro-gui stop <SESSION_ID>
   micro-gui help
@@ -29,6 +33,7 @@ Commands:
   doctor  Inspect terminal capabilities needed by micro-gui
   demo    Render a generated RGB frame with the Kitty Graphics Protocol
   run     Run one host application or OCI image on a private Xvfb display
+  agent   Serve a GUI application to a Firecrab host client
   ps      List running micro-gui sessions
   stop    Gracefully stop a running session
 "#;
@@ -62,6 +67,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
             render_demo(std::io::stdout().lock(), options).map_err(|error| error.to_string())
         }
         "run" => run_application(parse_run_options(&args[1..])?),
+        "agent" => run_agent_command(&args[1..]),
         "ps" => list_sessions(&args[1..]),
         "stop" => stop_session(&args[1..]),
         "help" | "--help" | "-h" => {
@@ -107,6 +113,7 @@ struct RunOptions {
     runtime: String,
     fps: u16,
     stats: bool,
+    firecrab_endpoint: Option<String>,
 }
 
 fn parse_run_options(args: &[String]) -> Result<RunOptions, String> {
@@ -118,6 +125,7 @@ fn parse_run_options(args: &[String]) -> Result<RunOptions, String> {
     let mut fps = 30;
     let mut stats = false;
     let mut application_arguments = Vec::new();
+    let mut firecrab_endpoint = None;
     let mut index = 1;
     while index < args.len() {
         if args[index] == "--" {
@@ -148,6 +156,15 @@ fn parse_run_options(args: &[String]) -> Result<RunOptions, String> {
             index += 2;
             continue;
         }
+        if args[index] == "--firecrab-endpoint" {
+            firecrab_endpoint = Some(
+                args.get(index + 1)
+                    .ok_or_else(|| "--firecrab-endpoint requires a value".to_string())?
+                    .clone(),
+            );
+            index += 2;
+            continue;
+        }
         if args[index] == "--stats" {
             stats = true;
             index += 1;
@@ -169,16 +186,11 @@ fn parse_run_options(args: &[String]) -> Result<RunOptions, String> {
         runtime: runtime.into(),
         fps,
         stats,
+        firecrab_endpoint,
     })
 }
 
 fn run_application(options: RunOptions) -> Result<(), String> {
-    if options.runtime == "firecrab" {
-        return Err(
-            "Firecrab does not expose the GUI frame/input guest channel required by micro-gui; use --runtime oci or native"
-                .into(),
-        );
-    }
     if !std::io::stdout().is_terminal() {
         return Err("stdout is not a terminal; run `micro-gui doctor` for details".into());
     }
@@ -204,6 +216,20 @@ fn run_application(options: RunOptions) -> Result<(), String> {
         "oci" | "docker" => {
             let spec = OciApplicationSpec::new(options.application, arguments);
             GuiSession::Oci(OciSession::start(&spec, 640, 360).map_err(|error| error.to_string())?)
+        }
+        "firecrab" => {
+            let endpoint = options
+                .firecrab_endpoint
+                .or_else(|| std::env::var("MICRO_GUI_FIRECRAB_ENDPOINT").ok())
+                .ok_or_else(|| {
+                    "Firecrab runtime requires --firecrab-endpoint HOST:PORT or MICRO_GUI_FIRECRAB_ENDPOINT"
+                        .to_string()
+                })?;
+            let token = std::env::var("MICRO_GUI_AGENT_TOKEN")
+                .map_err(|_| "Firecrab runtime requires MICRO_GUI_AGENT_TOKEN".to_string())?;
+            GuiSession::Firecrab(
+                FirecrabSession::connect(&endpoint, &token).map_err(|error| error.to_string())?,
+            )
         }
         runtime => return Err(format!("unsupported runtime '{runtime}'")),
     };
@@ -306,6 +332,67 @@ fn run_application(options: RunOptions) -> Result<(), String> {
     render_result
 }
 
+fn run_agent_command(args: &[String]) -> Result<(), String> {
+    let Some(application) = args.first() else {
+        return Err("agent requires an application".into());
+    };
+    let mut listen = format!("0.0.0.0:{DEFAULT_AGENT_PORT}");
+    let mut width = 640;
+    let mut height = 360;
+    let mut fps = 30;
+    let mut arguments = Vec::new();
+    let mut index = 1;
+    while index < args.len() {
+        if args[index] == "--" {
+            arguments.extend(args[index + 1..].iter().cloned().map(OsString::from));
+            break;
+        }
+        let numeric = match args[index].as_str() {
+            "--width" => Some(&mut width),
+            "--height" => Some(&mut height),
+            "--fps" => Some(&mut fps),
+            _ => None,
+        };
+        if let Some(target) = numeric {
+            let value = args
+                .get(index + 1)
+                .ok_or_else(|| format!("{} requires a value", args[index]))?;
+            *target = value
+                .parse::<u16>()
+                .map_err(|_| format!("'{value}' is not a valid number"))?;
+            index += 2;
+            continue;
+        }
+        if args[index] == "--listen" {
+            listen = args
+                .get(index + 1)
+                .ok_or_else(|| "--listen requires a value".to_string())?
+                .clone();
+            index += 2;
+            continue;
+        }
+        return Err(format!("unknown agent option '{}'", args[index]));
+    }
+    if width == 0 || height == 0 {
+        return Err("agent dimensions must be non-zero".into());
+    }
+    if !(1..=60).contains(&fps) {
+        return Err("agent FPS must be between 1 and 60".into());
+    }
+    let token = std::env::var("MICRO_GUI_AGENT_TOKEN")
+        .map_err(|_| "agent requires MICRO_GUI_AGENT_TOKEN".to_string())?;
+    run_agent(AgentConfig {
+        listen,
+        token,
+        application: OsString::from(application),
+        arguments,
+        width,
+        height,
+        fps,
+    })
+    .map_err(|error| error.to_string())
+}
+
 fn list_sessions(args: &[String]) -> Result<(), String> {
     if !args.is_empty() {
         return Err("ps does not accept arguments".into());
@@ -361,6 +448,7 @@ fn looks_like_oci_reference(application: &str) -> bool {
 enum GuiSession {
     Native(NativeSession),
     Oci(OciSession),
+    Firecrab(FirecrabSession),
 }
 
 impl GuiSession {
@@ -368,6 +456,7 @@ impl GuiSession {
         match self {
             Self::Native(session) => session.capture().map_err(|error| error.to_string()),
             Self::Oci(session) => session.capture().map_err(|error| error.to_string()),
+            Self::Firecrab(session) => session.capture().map_err(|error| error.to_string()),
         }
     }
 
@@ -375,13 +464,15 @@ impl GuiSession {
         match self {
             Self::Native(session) => session.frame_pending().map_err(|error| error.to_string()),
             Self::Oci(session) => session.frame_pending().map_err(|error| error.to_string()),
+            Self::Firecrab(session) => session.frame_pending().map_err(|error| error.to_string()),
         }
     }
 
-    fn inject(&self, event: &InputEvent) -> Result<(), String> {
+    fn inject(&mut self, event: &InputEvent) -> Result<(), String> {
         match self {
             Self::Native(session) => session.inject(event).map_err(|error| error.to_string()),
             Self::Oci(session) => session.inject(event).map_err(|error| error.to_string()),
+            Self::Firecrab(session) => session.inject(event).map_err(|error| error.to_string()),
         }
     }
 
@@ -389,6 +480,7 @@ impl GuiSession {
         match self {
             Self::Native(session) => session.display_size(),
             Self::Oci(session) => session.display_size(),
+            Self::Firecrab(session) => session.display_size(),
         }
     }
 
@@ -396,6 +488,7 @@ impl GuiSession {
         match self {
             Self::Native(session) => session.is_running().map_err(|error| error.to_string()),
             Self::Oci(session) => session.is_running().map_err(|error| error.to_string()),
+            Self::Firecrab(session) => session.is_running().map_err(|error| error.to_string()),
         }
     }
 }
@@ -510,6 +603,7 @@ mod tests {
                 runtime: "native".into(),
                 fps: 30,
                 stats: false,
+                firecrab_endpoint: None,
             }
         );
     }

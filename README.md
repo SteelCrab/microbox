@@ -104,11 +104,15 @@ can be inspected with:
 micro-gui run xeyes --fps 30 --stats
 ```
 
-The Firecrab CLI form remains reserved and reports the missing guest transport:
+The Firecrab form connects to the authenticated micro-gui guest agent through a
+Firecrab TCP port forward:
 
 ```sh
 micro-gui run firefox --runtime firecrab
 ```
+
+See [the Firecrab transport guide](docs/firecrab.md) for the agent image,
+authentication, port-forward configuration, and current control-plane boundary.
 
 ## v0.1 scope
 

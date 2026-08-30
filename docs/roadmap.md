@@ -85,8 +85,9 @@ Kitty 호환 terminal에서의 GTK Demo 수동 조작 확인은 release checklis
 
 1. [x] Alpine/OCI application image backend (Docker engine, X11 socket,
    disposable lifecycle)
-2. [ ] Firecrab MicroVM backend — Firecrab에 bidirectional GUI guest transport가
-   먼저 필요
+2. [x] Firecrab MicroVM GUI data plane — authenticated guest agent, frame/input
+   wire protocol, host adapter
+   - [ ] Firecrab control-plane 자동화는 image/network/VM 삭제 정책 입력 필요
 3. Wayland/Weston backend
 4. [x] user-private session registry와 cross-terminal `ps`/`stop`
 5. [ ] detachable session daemon과 재연결
