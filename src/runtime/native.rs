@@ -132,20 +132,26 @@ pub struct NativeSession {
 
 impl NativeSession {
     pub fn start(spec: &ApplicationSpec, width: u16, height: u16) -> Result<Self, NativeError> {
+        Self::start_with_command(width, height, spec.program(), |display_name| {
+            let mut command = Command::new(spec.program());
+            command.args(spec.arguments());
+            configure_x11_command(&mut command, display_name);
+            command
+        })
+    }
+
+    pub(super) fn start_with_command(
+        width: u16,
+        height: u16,
+        program: &OsStr,
+        build: impl FnOnce(&str) -> Command,
+    ) -> Result<Self, NativeError> {
         let xvfb = Xvfb::start(width, height)?;
         let display = connect_with_retry(xvfb.display_name(), STARTUP_TIMEOUT)?;
-        let mut command = Command::new(spec.program());
-        command
-            .args(spec.arguments())
-            .env("DISPLAY", xvfb.display_name())
-            .env("GDK_BACKEND", "x11")
-            .env_remove("WAYLAND_DISPLAY")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+        let mut command = build(xvfb.display_name());
         let mut application =
             ManagedChild::spawn(&mut command).map_err(|error| NativeError::StartApplication {
-                program: spec.program().to_string_lossy().into_owned(),
+                program: program.to_string_lossy().into_owned(),
                 message: error.to_string(),
             })?;
 
@@ -215,6 +221,16 @@ impl NativeSession {
     fn kill_xvfb(&mut self) {
         self.xvfb._process.terminate();
     }
+}
+
+fn configure_x11_command(command: &mut Command, display_name: &str) {
+    command
+        .env("DISPLAY", display_name)
+        .env("GDK_BACKEND", "x11")
+        .env_remove("WAYLAND_DISPLAY")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
 }
 
 fn connect_with_retry(display_name: &str, timeout: Duration) -> Result<X11Display, NativeError> {

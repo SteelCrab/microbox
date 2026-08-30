@@ -7,7 +7,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use micro_gui::protocol::{InputEvent, ViewportMapping};
-use micro_gui::runtime::{ApplicationSpec, NativeSession};
+use micro_gui::renderer::Frame;
+use micro_gui::runtime::{ApplicationSpec, NativeSession, OciApplicationSpec, OciSession};
 use micro_gui::terminal::{
     DemoOptions, DoctorReport, KittyFrameRenderer, RenderOutcome, TerminalAction, TerminalGuard,
     poll_action, render_demo,
@@ -18,13 +19,13 @@ const HELP: &str = r#"micro-gui — GUI applications, without the desktop
 Usage:
   micro-gui doctor
   micro-gui demo [--width PIXELS] [--height PIXELS]
-  micro-gui run <APPLICATION> [--runtime native|firecrab] [--fps 1..60] [--stats] [-- ARGS...]
+  micro-gui run <APPLICATION|OCI_IMAGE> [--runtime native|oci|firecrab] [--fps 1..60] [--stats] [-- ARGS...]
   micro-gui help
 
 Commands:
   doctor  Inspect terminal capabilities needed by micro-gui
   demo    Render a generated RGB frame with the Kitty Graphics Protocol
-  run     Run one application on a private Xvfb display (native runtime)
+  run     Run one host application or OCI image on a private Xvfb display
 "#;
 
 fn main() -> ExitCode {
@@ -106,6 +107,7 @@ fn parse_run_options(args: &[String]) -> Result<RunOptions, String> {
         return Err("run requires an application".into());
     };
     let mut runtime = "native";
+    let mut runtime_explicit = false;
     let mut fps = 30;
     let mut stats = false;
     let mut application_arguments = Vec::new();
@@ -119,9 +121,10 @@ fn parse_run_options(args: &[String]) -> Result<RunOptions, String> {
             runtime = args
                 .get(index + 1)
                 .ok_or_else(|| "--runtime requires a value".to_string())?;
-            if !matches!(runtime, "native" | "firecrab") {
+            if !matches!(runtime, "native" | "oci" | "docker" | "firecrab") {
                 return Err(format!("unsupported runtime '{runtime}'"));
             }
+            runtime_explicit = true;
             index += 2;
             continue;
         }
@@ -149,6 +152,10 @@ fn parse_run_options(args: &[String]) -> Result<RunOptions, String> {
         ));
     }
 
+    if !runtime_explicit && looks_like_oci_reference(application) {
+        runtime = "oci";
+    }
+
     Ok(RunOptions {
         application: application.clone(),
         application_arguments,
@@ -160,20 +167,33 @@ fn parse_run_options(args: &[String]) -> Result<RunOptions, String> {
 
 fn run_application(options: RunOptions) -> Result<(), String> {
     if options.runtime == "firecrab" {
-        return Err("the firecrab runtime is planned after v0.1 and is not available yet".into());
+        return Err(
+            "Firecrab does not expose the GUI frame/input guest channel required by micro-gui; use --runtime oci or native"
+                .into(),
+        );
     }
     if !std::io::stdout().is_terminal() {
         return Err("stdout is not a terminal; run `micro-gui doctor` for details".into());
     }
 
-    let spec = ApplicationSpec::new(
-        OsString::from(&options.application),
-        options
-            .application_arguments
-            .into_iter()
-            .map(OsString::from),
-    );
-    let mut session = NativeSession::start(&spec, 640, 360).map_err(|error| error.to_string())?;
+    let arguments: Vec<OsString> = options
+        .application_arguments
+        .into_iter()
+        .map(OsString::from)
+        .collect();
+    let mut session = match options.runtime.as_str() {
+        "native" => {
+            let spec = ApplicationSpec::new(OsString::from(&options.application), arguments);
+            GuiSession::Native(
+                NativeSession::start(&spec, 640, 360).map_err(|error| error.to_string())?,
+            )
+        }
+        "oci" | "docker" => {
+            let spec = OciApplicationSpec::new(options.application, arguments);
+            GuiSession::Oci(OciSession::start(&spec, 640, 360).map_err(|error| error.to_string())?)
+        }
+        runtime => return Err(format!("unsupported runtime '{runtime}'")),
+    };
 
     let running = Arc::new(AtomicBool::new(true));
     let signal_flag = Arc::clone(&running);
@@ -269,6 +289,58 @@ fn run_application(options: RunOptions) -> Result<(), String> {
     render_result
 }
 
+fn looks_like_oci_reference(application: &str) -> bool {
+    if application.starts_with('/')
+        || application.starts_with("./")
+        || application.starts_with("../")
+    {
+        return false;
+    }
+    application.contains('/') || application.contains(':') || application.contains('@')
+}
+
+enum GuiSession {
+    Native(NativeSession),
+    Oci(OciSession),
+}
+
+impl GuiSession {
+    fn capture(&mut self) -> Result<Frame, String> {
+        match self {
+            Self::Native(session) => session.capture().map_err(|error| error.to_string()),
+            Self::Oci(session) => session.capture().map_err(|error| error.to_string()),
+        }
+    }
+
+    fn frame_pending(&mut self) -> Result<bool, String> {
+        match self {
+            Self::Native(session) => session.frame_pending().map_err(|error| error.to_string()),
+            Self::Oci(session) => session.frame_pending().map_err(|error| error.to_string()),
+        }
+    }
+
+    fn inject(&self, event: &InputEvent) -> Result<(), String> {
+        match self {
+            Self::Native(session) => session.inject(event).map_err(|error| error.to_string()),
+            Self::Oci(session) => session.inject(event).map_err(|error| error.to_string()),
+        }
+    }
+
+    fn display_size(&self) -> (u16, u16) {
+        match self {
+            Self::Native(session) => session.display_size(),
+            Self::Oci(session) => session.display_size(),
+        }
+    }
+
+    fn is_running(&mut self) -> Result<bool, String> {
+        match self {
+            Self::Native(session) => session.is_running().map_err(|error| error.to_string()),
+            Self::Oci(session) => session.is_running().map_err(|error| error.to_string()),
+        }
+    }
+}
+
 #[derive(Default)]
 struct RenderStats {
     polls: u64,
@@ -340,8 +412,25 @@ mod tests {
     #[test]
     fn rejects_unknown_runtime() {
         let error =
-            parse_run_options(&["xeyes".into(), "--runtime".into(), "docker".into()]).unwrap_err();
+            parse_run_options(&["xeyes".into(), "--runtime".into(), "unknown".into()]).unwrap_err();
         assert!(error.contains("unsupported runtime"));
+    }
+
+    #[test]
+    fn accepts_oci_runtime_aliases() {
+        for runtime in ["oci", "docker"] {
+            let options =
+                parse_run_options(&["example/gui:1".into(), "--runtime".into(), runtime.into()])
+                    .unwrap();
+            assert_eq!(options.runtime, runtime);
+        }
+    }
+
+    #[test]
+    fn infers_oci_runtime_from_registry_reference() {
+        let options = parse_run_options(&["ghcr.io/example/gui:1".into()]).unwrap();
+        assert_eq!(options.runtime, "oci");
+        assert!(!looks_like_oci_reference("./target/debug/gui"));
     }
 
     #[test]
