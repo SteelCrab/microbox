@@ -6,6 +6,8 @@
 
 <p align="center"><strong>GUI applications, without the desktop.</strong></p>
 
+<p align="center">English · <a href="README.ko.md">한국어</a></p>
+
 microbox runs one Linux GUI application as if it were a terminal command. It
 renders the application with the Kitty Graphics Protocol, forwards keyboard and
 mouse input, follows terminal pixel-size changes, and owns the complete process
