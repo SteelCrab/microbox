@@ -68,6 +68,21 @@ container, shares only the private X11 Unix socket, enables
 `no-new-privileges`, and force-removes that exact container on exit. Docker is
 the engine for this initial OCI implementation.
 
+Each foreground run publishes a user-private session record. From another
+terminal, sessions can be inspected and stopped without guessing process IDs:
+
+```sh
+micro-gui ps
+micro-gui stop gui-12345
+```
+
+`stop` sends `SIGTERM` only after matching both the recorded PID and its Linux
+process start time, preventing a stale record from targeting a reused PID.
+Records live below `$XDG_RUNTIME_DIR/micro-gui/sessions` (with a user-specific
+temporary fallback), are mode `0600`, and disappear on normal or signal-driven
+exit. This is cross-terminal control for foreground sessions; detachable
+rendering and re-attachment are not implemented.
+
 `run` creates a private 640×360 Xvfb display, expands the first mapped window,
 captures the X11 root image at up to 30 FPS, and renders it in the terminal.
 The terminal enters an alternate screen with mouse tracking; keyboard and mouse
@@ -96,8 +111,7 @@ micro-gui run firefox --runtime firecrab
 - Keyboard, mouse, and terminal-resize forwarding (fixed-size GUI framebuffer)
 - Deterministic cleanup when the application or client exits
 
-Background sessions (`ps`/`stop`), Wayland, and Firecrab transport work remain
-post-v0.1.
+Detachable sessions, Wayland, and Firecrab transport work remain post-v0.1.
 
 See [the v0.1 architecture](docs/architecture-v0.1.md) and
 [the implementation roadmap](docs/roadmap.md) for the concrete design and

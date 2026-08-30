@@ -88,5 +88,6 @@ Kitty 호환 terminal에서의 GTK Demo 수동 조작 확인은 release checklis
 2. [ ] Firecrab MicroVM backend — Firecrab에 bidirectional GUI guest transport가
    먼저 필요
 3. Wayland/Weston backend
-4. background session daemon과 `ps`/`stop`
-5. clipboard, audio, 고급 keyboard/IME
+4. [x] user-private session registry와 cross-terminal `ps`/`stop`
+5. [ ] detachable session daemon과 재연결
+6. [ ] clipboard, audio, 고급 keyboard/IME

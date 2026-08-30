@@ -12,10 +12,12 @@
 - Docker-backed OCI sessions with automatic image-reference detection, private
   X11 socket sharing, missing-image pulls, and deterministic container cleanup.
 - Alpine `xeyes` OCI example for end-to-end smoke testing.
+- Add a user-private, PID-reuse-safe session registry and cross-terminal `ps`
+  and `stop` commands.
 
 ### Known limitations
 
 - Native mode is not a security sandbox.
 - One foreground application and the first mapped top-level window are supported.
 - The X11 framebuffer remains fixed at 640×360 during a session.
-- Firecrab, Wayland, persistent sessions, clipboard, and audio are not part of v0.1.
+- Firecrab, Wayland, detachable sessions, clipboard, and audio are not part of v0.1.

@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use micro_gui::protocol::{InputEvent, ViewportMapping};
 use micro_gui::renderer::Frame;
 use micro_gui::runtime::{ApplicationSpec, NativeSession, OciApplicationSpec, OciSession};
+use micro_gui::session::SessionRegistry;
 use micro_gui::terminal::{
     DemoOptions, DoctorReport, KittyFrameRenderer, RenderOutcome, TerminalAction, TerminalGuard,
     poll_action, render_demo,
@@ -20,12 +21,16 @@ Usage:
   micro-gui doctor
   micro-gui demo [--width PIXELS] [--height PIXELS]
   micro-gui run <APPLICATION|OCI_IMAGE> [--runtime native|oci|firecrab] [--fps 1..60] [--stats] [-- ARGS...]
+  micro-gui ps
+  micro-gui stop <SESSION_ID>
   micro-gui help
 
 Commands:
   doctor  Inspect terminal capabilities needed by micro-gui
   demo    Render a generated RGB frame with the Kitty Graphics Protocol
   run     Run one host application or OCI image on a private Xvfb display
+  ps      List running micro-gui sessions
+  stop    Gracefully stop a running session
 "#;
 
 fn main() -> ExitCode {
@@ -57,6 +62,8 @@ fn run(args: Vec<String>) -> Result<(), String> {
             render_demo(std::io::stdout().lock(), options).map_err(|error| error.to_string())
         }
         "run" => run_application(parse_run_options(&args[1..])?),
+        "ps" => list_sessions(&args[1..]),
+        "stop" => stop_session(&args[1..]),
         "help" | "--help" | "-h" => {
             print!("{HELP}");
             Ok(())
@@ -176,6 +183,12 @@ fn run_application(options: RunOptions) -> Result<(), String> {
         return Err("stdout is not a terminal; run `micro-gui doctor` for details".into());
     }
 
+    let session_application = options.application.clone();
+    let session_runtime = match options.runtime.as_str() {
+        "docker" => "oci",
+        runtime => runtime,
+    }
+    .to_string();
     let arguments: Vec<OsString> = options
         .application_arguments
         .into_iter()
@@ -199,6 +212,10 @@ fn run_application(options: RunOptions) -> Result<(), String> {
     let signal_flag = Arc::clone(&running);
     ctrlc::set_handler(move || signal_flag.store(false, Ordering::SeqCst))
         .map_err(|error| format!("could not install Ctrl-C handler: {error}"))?;
+    let registry = SessionRegistry::discover().map_err(|error| error.to_string())?;
+    let _registration = registry
+        .register(session_application, session_runtime)
+        .map_err(|error| format!("could not register session: {error}"))?;
 
     let keyboard_enhanced = DoctorReport::detect().kitty_graphics_likely;
     let terminal_guard = TerminalGuard::enter(keyboard_enhanced)
@@ -287,6 +304,48 @@ fn run_application(options: RunOptions) -> Result<(), String> {
         eprintln!("{stats}");
     }
     render_result
+}
+
+fn list_sessions(args: &[String]) -> Result<(), String> {
+    if !args.is_empty() {
+        return Err("ps does not accept arguments".into());
+    }
+    let registry = SessionRegistry::discover().map_err(|error| error.to_string())?;
+    let records = registry.list().map_err(|error| error.to_string())?;
+    println!("{:<18} {:<10} {:<8} APP", "ID", "RUNTIME", "PID");
+    for record in records {
+        println!(
+            "{:<18} {:<10} {:<8} {}",
+            record.id,
+            clean_table_cell(&record.runtime),
+            record.pid,
+            clean_table_cell(&record.application)
+        );
+    }
+    Ok(())
+}
+
+fn stop_session(args: &[String]) -> Result<(), String> {
+    let [id] = args else {
+        return Err("stop requires exactly one session id".into());
+    };
+    let registry = SessionRegistry::discover().map_err(|error| error.to_string())?;
+    let record = registry.stop(id).map_err(|error| error.to_string())?;
+    println!("stop requested for {} ({})", record.id, record.application);
+    Ok(())
+}
+
+fn clean_table_cell(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect()
 }
 
 fn looks_like_oci_reference(application: &str) -> bool {
@@ -466,5 +525,10 @@ mod tests {
         .unwrap();
         assert_eq!(options.fps, 45);
         assert!(options.stats);
+    }
+
+    #[test]
+    fn sanitizes_session_table_cells() {
+        assert_eq!(clean_table_cell("app\nname\t1"), "app name 1");
     }
 }
