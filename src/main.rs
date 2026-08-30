@@ -127,7 +127,7 @@ fn parse_run_options(args: &[String]) -> Result<RunOptions, String> {
     };
     let mut runtime = "native";
     let mut runtime_explicit = false;
-    let mut fps = 30;
+    let mut fps = 60;
     let mut stats = false;
     let mut debug = false;
     let mut application_arguments = Vec::new();
@@ -526,7 +526,7 @@ fn run_agent_command(args: &[String]) -> Result<(), String> {
         return Err("agent requires an application".into());
     };
     let mut listen = format!("0.0.0.0:{DEFAULT_AGENT_PORT}");
-    let mut fps = 30;
+    let mut fps = 60;
     let mut arguments = Vec::new();
     let mut index = 1;
     while index < args.len() {
@@ -886,7 +886,7 @@ mod tests {
                 application: "viewer".into(),
                 application_arguments: vec!["a file.png".into()],
                 runtime: "native".into(),
-                fps: 30,
+                fps: 60,
                 stats: false,
                 debug: false,
                 firecrab_endpoint: None,

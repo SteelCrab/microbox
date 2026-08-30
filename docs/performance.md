@@ -32,7 +32,7 @@ XDamage가 idle frame capture를 억제하여 초기 목표인 CPU 5% 미만을 
 
 ## Rendering policy
 
-- frame clock은 1–60 FPS이며 기본값은 30 FPS입니다.
+- frame clock은 1–60 FPS이며 기본값은 60 FPS입니다.
 - overdue tick을 누적하지 않고 다음 deadline을 현재 시각 기준으로 다시 잡습니다.
 - XDamage event가 없으면 X11 capture와 terminal write를 모두 건너뜁니다.
 - 변경된 64px tile 면적이 전체의 35% 미만이면 tile overlay를 전송합니다.
