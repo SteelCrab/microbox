@@ -4,6 +4,9 @@
 
 ### Added
 
+- Rename the project, crate, binary, runtime paths, environment variables,
+  container prefixes, examples, and documentation from the former name to
+  `microbox`.
 - Native Xvfb application lifecycle and X11 capture.
 - Kitty Graphics full-frame and dirty-tile rendering.
 - XDamage and MIT-SHM optimized capture with fallbacks.

@@ -6,35 +6,35 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use micro_gui::protocol::{DEFAULT_AGENT_PORT, InputEvent, ViewportMapping};
-use micro_gui::renderer::Frame;
-use micro_gui::runtime::{
+use microbox::protocol::{DEFAULT_AGENT_PORT, InputEvent, ViewportMapping};
+use microbox::renderer::Frame;
+use microbox::runtime::{
     AgentConfig, ApplicationSpec, FirecrabSession, NativeSession, OciApplicationSpec, OciSession,
     run_agent,
 };
-use micro_gui::session::SessionRegistry;
-use micro_gui::terminal::{
+use microbox::session::SessionRegistry;
+use microbox::terminal::{
     DemoOptions, DoctorReport, KittyFrameRenderer, RenderOutcome, TerminalAction, TerminalGuard,
     poll_action, render_demo,
 };
 
-const HELP: &str = r#"micro-gui — GUI applications, without the desktop
+const HELP: &str = r#"microbox — GUI applications, without the desktop
 
 Usage:
-  micro-gui doctor
-  micro-gui demo [--width PIXELS] [--height PIXELS]
-  micro-gui run <APPLICATION|OCI_IMAGE> [--runtime native|oci|firecrab] [--fps 1..60] [--stats] [-- ARGS...]
-  micro-gui agent <APPLICATION> [--listen ADDRESS] [--fps 1..60] [-- ARGS...]
-  micro-gui ps
-  micro-gui stop <SESSION_ID>
-  micro-gui help
+  microbox doctor
+  microbox demo [--width PIXELS] [--height PIXELS]
+  microbox run <APPLICATION|OCI_IMAGE> [--runtime native|oci|firecrab] [--fps 1..60] [--stats] [-- ARGS...]
+  microbox agent <APPLICATION> [--listen ADDRESS] [--fps 1..60] [-- ARGS...]
+  microbox ps
+  microbox stop <SESSION_ID>
+  microbox help
 
 Commands:
-  doctor  Inspect terminal capabilities needed by micro-gui
+  doctor  Inspect terminal capabilities needed by microbox
   demo    Render a generated RGB frame with the Kitty Graphics Protocol
   run     Run one host application or OCI image on a private Xvfb display
   agent   Serve a GUI application to a Firecrab host client
-  ps      List running micro-gui sessions
+  ps      List running microbox sessions
   stop    Gracefully stop a running session
 "#;
 
@@ -42,7 +42,7 @@ fn main() -> ExitCode {
     match run(std::env::args().skip(1).collect()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
-            eprintln!("micro-gui: {message}");
+            eprintln!("microbox: {message}");
             ExitCode::FAILURE
         }
     }
@@ -75,7 +75,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
             Ok(())
         }
         "--version" | "-V" => {
-            println!("micro-gui {}", env!("CARGO_PKG_VERSION"));
+            println!("microbox {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
         other => Err(format!("unknown command '{other}'\n\n{HELP}")),
@@ -192,7 +192,7 @@ fn parse_run_options(args: &[String]) -> Result<RunOptions, String> {
 
 fn run_application(options: RunOptions) -> Result<(), String> {
     if !std::io::stdout().is_terminal() {
-        return Err("stdout is not a terminal; run `micro-gui doctor` for details".into());
+        return Err("stdout is not a terminal; run `microbox doctor` for details".into());
     }
 
     let session_application = options.application.clone();
@@ -220,13 +220,13 @@ fn run_application(options: RunOptions) -> Result<(), String> {
         "firecrab" => {
             let endpoint = options
                 .firecrab_endpoint
-                .or_else(|| std::env::var("MICRO_GUI_FIRECRAB_ENDPOINT").ok())
+                .or_else(|| std::env::var("MICROBOX_FIRECRAB_ENDPOINT").ok())
                 .ok_or_else(|| {
-                    "Firecrab runtime requires --firecrab-endpoint HOST:PORT or MICRO_GUI_FIRECRAB_ENDPOINT"
+                    "Firecrab runtime requires --firecrab-endpoint HOST:PORT or MICROBOX_FIRECRAB_ENDPOINT"
                         .to_string()
                 })?;
-            let token = std::env::var("MICRO_GUI_AGENT_TOKEN")
-                .map_err(|_| "Firecrab runtime requires MICRO_GUI_AGENT_TOKEN".to_string())?;
+            let token = std::env::var("MICROBOX_AGENT_TOKEN")
+                .map_err(|_| "Firecrab runtime requires MICROBOX_AGENT_TOKEN".to_string())?;
             GuiSession::Firecrab(
                 FirecrabSession::connect(&endpoint, &token).map_err(|error| error.to_string())?,
             )
@@ -379,8 +379,8 @@ fn run_agent_command(args: &[String]) -> Result<(), String> {
     if !(1..=60).contains(&fps) {
         return Err("agent FPS must be between 1 and 60".into());
     }
-    let token = std::env::var("MICRO_GUI_AGENT_TOKEN")
-        .map_err(|_| "agent requires MICRO_GUI_AGENT_TOKEN".to_string())?;
+    let token = std::env::var("MICROBOX_AGENT_TOKEN")
+        .map_err(|_| "agent requires MICROBOX_AGENT_TOKEN".to_string())?;
     run_agent(AgentConfig {
         listen,
         token,
@@ -522,7 +522,7 @@ impl std::fmt::Display for RenderStats {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             formatter,
-            "micro-gui render stats: polls={}, captured={}, full={}, tile_frames={}, tiles={}, unchanged={}, skipped={}",
+            "microbox render stats: polls={}, captured={}, full={}, tile_frames={}, tiles={}, unchanged={}, skipped={}",
             self.polls,
             self.captured,
             self.full,

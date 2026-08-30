@@ -237,7 +237,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "micro-gui"
+name = "microbox"
 version = "0.1.0"
 dependencies = [
  "crossterm",
@@ -249,12 +249,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "micro-gui-fuzz"
+name = "microbox-fuzz"
 version = "0.0.0"
 dependencies = [
  "crossterm",
  "libfuzzer-sys",
- "micro-gui",
+ "microbox",
 ]
 
 [[package]]

@@ -28,13 +28,13 @@ pub struct SessionRegistry {
 
 impl SessionRegistry {
     pub fn discover() -> Result<Self, RegistryError> {
-        let directory = if let Some(path) = std::env::var_os("MICRO_GUI_RUNTIME_DIR") {
+        let directory = if let Some(path) = std::env::var_os("MICROBOX_RUNTIME_DIR") {
             PathBuf::from(path)
         } else if let Some(path) = std::env::var_os("XDG_RUNTIME_DIR") {
-            PathBuf::from(path).join("micro-gui").join("sessions")
+            PathBuf::from(path).join("microbox").join("sessions")
         } else {
             std::env::temp_dir()
-                .join(format!("micro-gui-{}", geteuid().as_raw()))
+                .join(format!("microbox-{}", geteuid().as_raw()))
                 .join("sessions")
         };
         Self::at(directory)
@@ -328,7 +328,7 @@ mod tests {
 
     fn test_registry(label: &str) -> SessionRegistry {
         let directory = std::env::temp_dir().join(format!(
-            "micro-gui-registry-test-{}-{label}",
+            "microbox-registry-test-{}-{label}",
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&directory);

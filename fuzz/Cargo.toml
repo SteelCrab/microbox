@@ -1,5 +1,5 @@
 [package]
-name = "micro-gui-fuzz"
+name = "microbox-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2024"
@@ -10,7 +10,7 @@ cargo-fuzz = true
 [dependencies]
 crossterm = "0.29.0"
 libfuzzer-sys = "0.4"
-micro-gui = { path = ".." }
+microbox = { path = ".." }
 
 [[bin]]
 name = "frame_and_input"

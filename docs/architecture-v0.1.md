@@ -1,11 +1,11 @@
-# micro-gui v0.1 아키텍처
+# microbox v0.1 아키텍처
 
 상태: Draft  
 대상: 첫 번째 동작 가능한 Linux 프로토타입
 
 ## 1. 성공 기준
 
-v0.1의 완료 조건은 Kitty Graphics 호환 터미널에서 `micro-gui run xeyes`를
+v0.1의 완료 조건은 Kitty Graphics 호환 터미널에서 `microbox run xeyes`를
 실행한 뒤 다음 작업을 할 수 있는 것입니다.
 
 1. 전용 X11 디스플레이에서 애플리케이션을 시작한다.
@@ -51,7 +51,7 @@ X11은 화면 읽기와 합성 입력을 위한 프로토콜이 성숙해 있고
 작은 검증용 애플리케이션이 풍부합니다. v0.1은 Xvfb에 애플리케이션 크기와
 동일한 root window를 만들고 별도 데스크톱 환경 없이 애플리케이션을 실행합니다.
 
-최상위 창의 위치와 크기를 강제하는 최소 정책은 micro-gui가 담당합니다.
+최상위 창의 위치와 크기를 강제하는 최소 정책은 microbox가 담당합니다.
 범용 window manager는 실행하지 않습니다. Wayland는 캡처와 입력 주입 경계가
 백엔드마다 달라 v0.1 이후 별도 backend로 추가합니다.
 
@@ -81,7 +81,7 @@ PNG 인코딩과 shared-memory 전송은 측정 결과가 필요할 때 추가�
 
 ### ADR-004: v0.1 session은 프로세스에 종속
 
-`micro-gui run` 프로세스가 session owner입니다. 클라이언트가 종료되면 GUI
+`microbox run` 프로세스가 session owner입니다. 클라이언트가 종료되면 GUI
 애플리케이션과 Xvfb도 종료합니다. 백그라운드 session registry가 없으므로
 v0.1에는 `ps`와 `stop`을 노출하지 않습니다.
 
@@ -189,7 +189,7 @@ terminal resize 시에는 다음 순서를 사용합니다.
 - XTEST 또는 capture extension 미지원
 - stdout write 실패 또는 terminal 연결 종료
 
-`micro-gui doctor`는 상태를 변경하지 않고 TTY와 알려진 terminal 환경을
+`microbox doctor`는 상태를 변경하지 않고 TTY와 알려진 terminal 환경을
 진단합니다. 환경 변수 검사는 힌트이며 최종 capability 판정은 protocol query로
 대체합니다.
 

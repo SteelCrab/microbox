@@ -10,7 +10,7 @@
 cargo build --release
 /usr/bin/time -f 'elapsed=%e user=%U system=%S cpu=%P max_rss_kb=%M' \
   script -qefc \
-  'timeout -s INT -k 2 5 target/release/micro-gui run xeyes --fps 30 --stats' \
+  'timeout -s INT -k 2 5 target/release/microbox run xeyes --fps 30 --stats' \
   /dev/null >/dev/null
 ```
 

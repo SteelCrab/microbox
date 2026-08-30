@@ -14,9 +14,9 @@ Required components:
 ./scripts/check-deps.sh
 cargo build --release
 cargo install --path .
-micro-gui doctor
-micro-gui demo
-micro-gui run xeyes
+microbox doctor
+microbox demo
+microbox run xeyes
 ```
 
 The native backend is not a sandbox. It gives the application a private X11
@@ -34,7 +34,7 @@ An installed Mousepad can be tested separately because its startup depends on
 the host D-Bus desktop session:
 
 ```sh
-MICRO_GUI_GTK_SMOKE=1 \
+MICROBOX_GTK_SMOKE=1 \
   cargo test runtime::native::tests::smoke_tests_mousepad -- --ignored
 ```
 
@@ -47,8 +47,8 @@ cargo fuzz run frame_and_input
 
 ## Terminal notes
 
-`micro-gui doctor` uses terminal environment variables as a conservative hint.
-If it reports `UNKNOWN`, run `micro-gui demo` for a visual protocol check. A
+`microbox doctor` uses terminal environment variables as a conservative hint.
+If it reports `UNKNOWN`, run `microbox demo` for a visual protocol check. A
 session always restores raw mode, mouse reporting, the cursor, and the alternate
 screen on ordinary errors and handled termination signals. `SIGKILL` cannot be
 intercepted by any process and therefore cannot run cleanup code.

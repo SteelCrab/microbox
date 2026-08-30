@@ -44,6 +44,7 @@ pub fn run_agent(config: AgentConfig) -> Result<(), AgentError> {
 
     let (width, height) = session.display_size();
     write_agent_message(&mut stream, &AgentMessage::Hello { width, height })?;
+    let _ = session.frame_pending()?;
     let initial = session.capture()?;
     write_agent_message(&mut stream, &AgentMessage::Frame(initial))?;
     stream.set_read_timeout(None).map_err(AgentError::Io)?;

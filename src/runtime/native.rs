@@ -16,6 +16,8 @@ use crate::renderer::Frame;
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(3);
 const APPLICATION_WINDOW_TIMEOUT: Duration = Duration::from_secs(15);
+const APPLICATION_REDRAW_TIMEOUT: Duration = Duration::from_millis(500);
+const APPLICATION_DRAW_SETTLE: Duration = Duration::from_millis(25);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApplicationSpec {
@@ -147,7 +149,7 @@ impl NativeSession {
         build: impl FnOnce(&str) -> Command,
     ) -> Result<Self, NativeError> {
         let xvfb = Xvfb::start(width, height)?;
-        let display = connect_with_retry(xvfb.display_name(), STARTUP_TIMEOUT)?;
+        let mut display = connect_with_retry(xvfb.display_name(), STARTUP_TIMEOUT)?;
         let mut command = build(xvfb.display_name());
         let mut application =
             ManagedChild::spawn(&mut command).map_err(|error| NativeError::StartApplication {
@@ -166,7 +168,16 @@ impl NativeSession {
                 return Err(NativeError::X11(error));
             }
         };
+        let _ = display.frame_pending().map_err(NativeError::X11)?;
         display.fill_screen(window).map_err(NativeError::X11)?;
+        let redraw_deadline = std::time::Instant::now() + APPLICATION_REDRAW_TIMEOUT;
+        while std::time::Instant::now() < redraw_deadline {
+            if display.frame_pending().map_err(NativeError::X11)? {
+                thread::sleep(APPLICATION_DRAW_SETTLE);
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
 
         Ok(Self {
             application,
@@ -417,7 +428,7 @@ mod tests {
     fn smoke_tests_mousepad() {
         let _test_lock = lock_xvfb();
         if !program_available("mousepad")
-            || std::env::var_os("MICRO_GUI_GTK_SMOKE").as_deref() != Some(OsStr::new("1"))
+            || std::env::var_os("MICROBOX_GTK_SMOKE").as_deref() != Some(OsStr::new("1"))
         {
             return;
         }
@@ -432,7 +443,7 @@ mod tests {
         if !program_available("xmessage") {
             return;
         }
-        let spec = ApplicationSpec::new("xmessage", [OsString::from("micro-gui smoke test")]);
+        let spec = ApplicationSpec::new("xmessage", [OsString::from("microbox smoke test")]);
         assert_application_draws(spec);
     }
 
@@ -512,7 +523,7 @@ mod tests {
         let _test_lock = lock_xvfb();
         let spec = ApplicationSpec::new("xeyes", []);
         let mut session = NativeSession::start(&spec, 320, 180).unwrap();
-        let expected = "micro-gui 한글 clipboard";
+        let expected = "microbox 한글 clipboard";
         session.inject(&InputEvent::Text(expected.into())).unwrap();
 
         let (connection, screen_number) = x11rb::connect(Some(session.display_name())).unwrap();
@@ -545,7 +556,7 @@ mod tests {
         };
         let clipboard = atom(b"CLIPBOARD");
         let utf8 = atom(b"UTF8_STRING");
-        let property = atom(b"MICRO_GUI_TEST_CLIPBOARD");
+        let property = atom(b"MICROBOX_TEST_CLIPBOARD");
         connection
             .convert_selection(window, clipboard, utf8, property, x11rb::CURRENT_TIME)
             .unwrap()

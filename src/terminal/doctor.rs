@@ -31,7 +31,7 @@ impl DoctorReport {
 
 impl Display for DoctorReport {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        writeln!(formatter, "micro-gui doctor")?;
+        writeln!(formatter, "microbox doctor")?;
         writeln!(
             formatter,
             "  stdout is a TTY       {}",
@@ -61,12 +61,12 @@ impl Display for DoctorReport {
         } else if self.kitty_graphics_likely {
             writeln!(
                 formatter,
-                "  result                READY for `micro-gui demo`"
+                "  result                READY for `microbox demo`"
             )
         } else {
             writeln!(
                 formatter,
-                "  result                UNKNOWN (run `micro-gui demo` to probe visually)"
+                "  result                UNKNOWN (run `microbox demo` to probe visually)"
             )
         }
     }

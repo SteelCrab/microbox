@@ -15,7 +15,7 @@
 
 ## Manual before tagging
 
-- [ ] Kitty: `micro-gui demo`
+- [ ] Kitty: `microbox demo`
 - [ ] Kitty: interactive `xeyes`
 - [ ] Ghostty: interactive `xeyes`
 - [ ] WezTerm: interactive `xeyes`

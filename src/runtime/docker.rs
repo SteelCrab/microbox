@@ -168,7 +168,7 @@ fn ensure_image(engine: &OsStr, image: &str) -> Result<(), OciError> {
 
 fn container_name() -> String {
     let sequence = CONTAINER_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    format!("micro-gui-{}-{sequence}", std::process::id())
+    format!("microbox-{}-{sequence}", std::process::id())
 }
 
 fn output_message(bytes: &[u8]) -> String {
@@ -246,7 +246,7 @@ mod tests {
     #[test]
     fn reports_missing_engine() {
         let spec =
-            OciApplicationSpec::new("example/gui:1", []).with_engine("missing-micro-gui-engine");
+            OciApplicationSpec::new("example/gui:1", []).with_engine("missing-microbox-engine");
         assert!(matches!(
             OciSession::start(&spec, 320, 180),
             Err(OciError::EngineUnavailable(_))
@@ -257,7 +257,7 @@ mod tests {
     fn generated_container_names_are_distinct_and_scoped() {
         let first = container_name();
         let second = container_name();
-        assert!(first.starts_with("micro-gui-"));
+        assert!(first.starts_with("microbox-"));
         assert_ne!(first, second);
     }
 

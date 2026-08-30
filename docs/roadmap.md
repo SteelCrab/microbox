@@ -1,4 +1,4 @@
-# micro-gui 구현 로드맵
+# microbox 구현 로드맵
 
 ## M0 — Terminal rendering foundation (현재)
 
@@ -28,7 +28,7 @@ cargo run -- demo
 - [x] 10 FPS 전체 frame 출력
 - [x] 종료 시 Xvfb와 application process group 정리
 
-완료 조건: Kitty 호환 터미널에서 `micro-gui run xeyes` 화면이 지속적으로
+완료 조건: Kitty 호환 터미널에서 `microbox run xeyes` 화면이 지속적으로
 갱신됩니다. 아직 입력은 필요하지 않습니다.
 
 통합 검증은 system dependency가 필요하므로 기본 test suite와 분리합니다.

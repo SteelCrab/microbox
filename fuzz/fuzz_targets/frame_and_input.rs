@@ -4,8 +4,8 @@ use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use libfuzzer_sys::fuzz_target;
-use micro_gui::renderer::{Frame, RenderPlanner};
-use micro_gui::terminal::decode_terminal_event;
+use microbox::renderer::{Frame, RenderPlanner};
+use microbox::terminal::decode_terminal_event;
 
 fuzz_target!(|data: &[u8]| {
     if data.len() < 4 {

@@ -1,8 +1,8 @@
-# micro-gui
+# microbox
 
 **GUI applications, without the desktop.**
 
-micro-gui is an experimental runtime for displaying and controlling a single
+microbox is an experimental runtime for displaying and controlling a single
 Linux GUI application directly inside a terminal. It targets terminals that
 implement the Kitty Graphics Protocol and does not require a desktop
 environment, VNC, or RDP.
@@ -11,20 +11,19 @@ environment, VNC, or RDP.
 > output, keyboard/mouse forwarding, and terminal resize remapping are
 > implemented.
 
-## Why micro-gui?
+## Why microbox?
 
-Traditional remote GUI setups expose an entire desktop. micro-gui instead owns
+Traditional remote GUI setups expose an entire desktop. microbox instead owns
 the lifecycle of one application:
 
 ```text
-GUI application → private X11 display → frame capture → micro-gui → terminal
-terminal input  → micro-gui → coordinate mapping → X11 input
+GUI application → private X11 display → frame capture → microbox → terminal
+terminal input  → microbox → coordinate mapping → X11 input
 ```
 
-The project is independent from Firecrab. The native and OCI backends are usable
-without it. Firecrab currently lacks the bidirectional guest frame/input channel
-needed for the planned MicroVM backend; micro-gui refuses that mode instead of
-claiming isolation it cannot provide.
+The project is independent from Firecrab. Native and OCI backends work without
+it. For MicroVM mode, microbox supplies the authenticated guest frame/input
+agent while Firecrab owns VM, image, network, and port-forward lifecycle.
 
 ## Try the rendering milestone
 
@@ -48,9 +47,9 @@ starting an X server.
 The current native interface is:
 
 ```sh
-micro-gui run xeyes
-micro-gui run firefox
-micro-gui run my-app -- --application-argument
+microbox run xeyes
+microbox run firefox
+microbox run my-app -- --application-argument
 ```
 
 An OCI reference containing a registry/repository separator is detected
@@ -58,9 +57,9 @@ automatically. `--runtime oci` (or the `docker` alias) is available for short
 local image names:
 
 ```sh
-docker build -t micro-gui/xeyes examples/oci-xeyes
-micro-gui run micro-gui/xeyes
-micro-gui run local-image --runtime oci -- --application-argument
+docker build -t microbox/xeyes examples/oci-xeyes
+microbox run microbox/xeyes
+microbox run local-image --runtime oci -- --application-argument
 ```
 
 The OCI backend pulls a missing image, starts a uniquely named disposable
@@ -72,13 +71,13 @@ Each foreground run publishes a user-private session record. From another
 terminal, sessions can be inspected and stopped without guessing process IDs:
 
 ```sh
-micro-gui ps
-micro-gui stop gui-12345
+microbox ps
+microbox stop gui-12345
 ```
 
 `stop` sends `SIGTERM` only after matching both the recorded PID and its Linux
 process start time, preventing a stale record from targeting a reused PID.
-Records live below `$XDG_RUNTIME_DIR/micro-gui/sessions` (with a user-specific
+Records live below `$XDG_RUNTIME_DIR/microbox/sessions` (with a user-specific
 temporary fallback), are mode `0600`, and disappear on normal or signal-driven
 exit. This is cross-terminal control for foreground sessions; detachable
 rendering and re-attachment are not implemented.
@@ -101,14 +100,16 @@ changes are sent as 64-pixel tile overlays. The frame rate and render counters
 can be inspected with:
 
 ```sh
-micro-gui run xeyes --fps 30 --stats
+microbox run xeyes --fps 30 --stats
 ```
 
-The Firecrab form connects to the authenticated micro-gui guest agent through a
+The Firecrab form connects to the authenticated microbox guest agent through a
 Firecrab TCP port forward:
 
 ```sh
-micro-gui run firefox --runtime firecrab
+MICROBOX_AGENT_TOKEN=RANDOM_SECRET \
+  microbox run firefox --runtime firecrab \
+  --firecrab-endpoint 127.0.0.1:15943
 ```
 
 See [the Firecrab transport guide](docs/firecrab.md) for the agent image,
@@ -122,7 +123,9 @@ authentication, port-forward configuration, and current control-plane boundary.
 - Keyboard, mouse, and terminal-resize forwarding (fixed-size GUI framebuffer)
 - Deterministic cleanup when the application or client exits
 
-Detachable sessions, Wayland, and Firecrab transport work remain post-v0.1.
+OCI, session control, composed input, and Firecrab transport are implemented on
+the post-v0.1 feature branches. Detachable sessions and Wayland remain future
+work.
 
 See [the v0.1 architecture](docs/architecture-v0.1.md) and
 [the implementation roadmap](docs/roadmap.md) for the concrete design and

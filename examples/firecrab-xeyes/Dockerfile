@@ -1,4 +1,4 @@
-FROM rust:1.85-alpine3.22 AS build
+FROM rust:1.85-alpine AS build
 
 RUN apk add --no-cache musl-dev
 WORKDIR /src
@@ -8,7 +8,7 @@ RUN cargo build --release --locked
 FROM alpine:3.24
 
 RUN apk add --no-cache xvfb xeyes
-COPY --from=build /src/target/release/micro-gui /usr/local/bin/micro-gui
+COPY --from=build /src/target/release/microbox /usr/local/bin/microbox
 
 EXPOSE 5943
-ENTRYPOINT ["micro-gui", "agent", "xeyes"]
+ENTRYPOINT ["microbox", "agent", "xeyes"]
