@@ -3,11 +3,19 @@ use std::fmt::{self, Display, Formatter};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use x11rb::CURRENT_TIME;
 use x11rb::connection::Connection;
 use x11rb::image::{Image, PixelLayout};
-use x11rb::protocol::xproto::{ConfigureWindowAux, ConnectionExt, MapState, Visualid, Window};
+use x11rb::protocol::xproto::{
+    BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT, ConfigureWindowAux, ConnectionExt, InputFocus,
+    KEY_PRESS_EVENT, KEY_RELEASE_EVENT, MOTION_NOTIFY_EVENT, MapState, Visualid, Window,
+};
+use x11rb::protocol::xtest::ConnectionExt as XTestConnectionExt;
 use x11rb::rust_connection::RustConnection;
+use xkeysym::key;
 
+use crate::protocol::modifiers;
+use crate::protocol::{InputEvent, KeyEvent, MouseButton, MouseEvent, MouseKind};
 use crate::renderer::Frame;
 
 pub struct X11Display {
@@ -16,6 +24,7 @@ pub struct X11Display {
     width: u16,
     height: u16,
     pixel_layout: PixelLayout,
+    keyboard_map: KeyboardMap,
 }
 
 impl X11Display {
@@ -34,6 +43,12 @@ impl X11Display {
             .ok_or(X11Error::MissingRootVisual)?;
         let pixel_layout = PixelLayout::from_visual_type(visual)
             .map_err(|error| X11Error::UnsupportedVisual(error.to_string()))?;
+        connection
+            .xtest_get_version(2, 2)
+            .map_err(connection_error)?
+            .reply()
+            .map_err(|error| X11Error::UnsupportedXTest(error.to_string()))?;
+        let keyboard_map = KeyboardMap::load(&connection)?;
 
         Ok(Self {
             connection,
@@ -41,6 +56,7 @@ impl X11Display {
             width,
             height,
             pixel_layout,
+            keyboard_map,
         })
     }
 
@@ -84,6 +100,11 @@ impl X11Display {
             .map_err(connection_error)?
             .check()
             .map_err(reply_error)?;
+        self.connection
+            .set_input_focus(InputFocus::PARENT, window, CURRENT_TIME)
+            .map_err(connection_error)?
+            .check()
+            .map_err(reply_error)?;
         self.connection.flush().map_err(connection_error)
     }
 
@@ -118,6 +139,180 @@ impl X11Display {
 
     pub fn size(&self) -> (u16, u16) {
         (self.width, self.height)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pointer_position(&self) -> Result<(i16, i16), X11Error> {
+        let reply = self
+            .connection
+            .query_pointer(self.root)
+            .map_err(connection_error)?
+            .reply()
+            .map_err(reply_error)?;
+        Ok((reply.root_x, reply.root_y))
+    }
+
+    pub fn inject(&self, event: &InputEvent) -> Result<(), X11Error> {
+        match event {
+            InputEvent::Key(event) => self.inject_key(event)?,
+            InputEvent::Mouse(event) => self.inject_mouse(event)?,
+            InputEvent::Resize { .. } => {}
+        }
+        self.connection.flush().map_err(connection_error)
+    }
+
+    fn inject_key(&self, event: &KeyEvent) -> Result<(), X11Error> {
+        let keycode = self
+            .keyboard_map
+            .keycode_for(event.code)
+            .ok_or(X11Error::UnmappedKeysym(event.code))?;
+        let modifier_keycodes = self.modifier_keycodes(event.modifiers)?;
+
+        if event.pressed {
+            for &modifier in &modifier_keycodes {
+                self.fake_key(modifier, true)?;
+            }
+            self.fake_key(keycode, true)
+        } else {
+            self.fake_key(keycode, false)?;
+            for &modifier in modifier_keycodes.iter().rev() {
+                self.fake_key(modifier, false)?;
+            }
+            Ok(())
+        }
+    }
+
+    fn modifier_keycodes(&self, value: u8) -> Result<Vec<u8>, X11Error> {
+        let mut result = Vec::with_capacity(4);
+        let requested = [
+            (modifiers::SHIFT, key::Shift_L),
+            (modifiers::CONTROL, key::Control_L),
+            (modifiers::ALT, key::Alt_L),
+            (modifiers::SUPER, key::Super_L),
+        ];
+        for (flag, keysym) in requested {
+            if value & flag != 0 {
+                result.push(
+                    self.keyboard_map
+                        .keycode_for(keysym)
+                        .ok_or(X11Error::UnmappedKeysym(keysym))?,
+                );
+            }
+        }
+        Ok(result)
+    }
+
+    fn fake_key(&self, keycode: u8, pressed: bool) -> Result<(), X11Error> {
+        self.connection
+            .xtest_fake_input(
+                if pressed {
+                    KEY_PRESS_EVENT
+                } else {
+                    KEY_RELEASE_EVENT
+                },
+                keycode,
+                CURRENT_TIME,
+                self.root,
+                0,
+                0,
+                0,
+            )
+            .map_err(connection_error)?
+            .check()
+            .map_err(reply_error)
+    }
+
+    fn inject_mouse(&self, event: &MouseEvent) -> Result<(), X11Error> {
+        let x = i16::try_from(event.x.min(u32::from(self.width.saturating_sub(1))))
+            .map_err(|_| X11Error::InvalidPointerCoordinate)?;
+        let y = i16::try_from(event.y.min(u32::from(self.height.saturating_sub(1))))
+            .map_err(|_| X11Error::InvalidPointerCoordinate)?;
+        if event.kind == MouseKind::Move {
+            self.connection
+                .xtest_fake_input(MOTION_NOTIFY_EVENT, 0, CURRENT_TIME, self.root, x, y, 0)
+                .map_err(connection_error)?
+                .check()
+                .map_err(reply_error)?;
+        }
+        if let Some(button) = event.button.filter(|_| event.kind != MouseKind::Move) {
+            let modifier_keycodes = self.modifier_keycodes(event.modifiers)?;
+            if event.kind == MouseKind::Press {
+                for &modifier in &modifier_keycodes {
+                    self.fake_key(modifier, true)?;
+                }
+            }
+            self.connection
+                .xtest_fake_input(
+                    if event.kind == MouseKind::Press {
+                        BUTTON_PRESS_EVENT
+                    } else {
+                        BUTTON_RELEASE_EVENT
+                    },
+                    mouse_button_number(button),
+                    CURRENT_TIME,
+                    self.root,
+                    x,
+                    y,
+                    0,
+                )
+                .map_err(connection_error)?
+                .check()
+                .map_err(reply_error)?;
+            if event.kind == MouseKind::Release {
+                for &modifier in modifier_keycodes.iter().rev() {
+                    self.fake_key(modifier, false)?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+struct KeyboardMap {
+    minimum_keycode: u8,
+    keysyms_per_keycode: usize,
+    keysyms: Vec<u32>,
+}
+
+impl KeyboardMap {
+    fn load(connection: &RustConnection) -> Result<Self, X11Error> {
+        let setup = connection.setup();
+        let minimum_keycode = setup.min_keycode;
+        let count = setup
+            .max_keycode
+            .checked_sub(minimum_keycode)
+            .and_then(|value| value.checked_add(1))
+            .ok_or(X11Error::InvalidKeyboardMap)?;
+        let reply = connection
+            .get_keyboard_mapping(minimum_keycode, count)
+            .map_err(connection_error)?
+            .reply()
+            .map_err(reply_error)?;
+        if reply.keysyms_per_keycode == 0 {
+            return Err(X11Error::InvalidKeyboardMap);
+        }
+        Ok(Self {
+            minimum_keycode,
+            keysyms_per_keycode: usize::from(reply.keysyms_per_keycode),
+            keysyms: reply.keysyms,
+        })
+    }
+
+    fn keycode_for(&self, keysym: u32) -> Option<u8> {
+        self.keysyms
+            .chunks_exact(self.keysyms_per_keycode)
+            .position(|symbols| symbols.contains(&keysym))
+            .and_then(|offset| self.minimum_keycode.checked_add(offset as u8))
+    }
+}
+
+fn mouse_button_number(button: MouseButton) -> u8 {
+    match button {
+        MouseButton::Left => 1,
+        MouseButton::Middle => 2,
+        MouseButton::Right => 3,
+        MouseButton::WheelUp => 4,
+        MouseButton::WheelDown => 5,
     }
 }
 
@@ -164,6 +359,10 @@ pub enum X11Error {
     MissingRootVisual,
     MissingCaptureVisual(Visualid),
     UnsupportedVisual(String),
+    UnsupportedXTest(String),
+    InvalidKeyboardMap,
+    UnmappedKeysym(u32),
+    InvalidPointerCoordinate,
     Protocol(String),
     Capture(String),
     WindowTimeout(Duration),
@@ -180,6 +379,19 @@ impl Display for X11Error {
             }
             Self::UnsupportedVisual(message) => {
                 write!(formatter, "unsupported X11 visual: {message}")
+            }
+            Self::UnsupportedXTest(message) => {
+                write!(formatter, "XTEST extension is unavailable: {message}")
+            }
+            Self::InvalidKeyboardMap => write!(formatter, "X11 returned an invalid keyboard map"),
+            Self::UnmappedKeysym(keysym) => {
+                write!(
+                    formatter,
+                    "keysym 0x{keysym:x} is not present in the X11 keymap"
+                )
+            }
+            Self::InvalidPointerCoordinate => {
+                write!(formatter, "pointer coordinate exceeds X11 range")
             }
             Self::Protocol(message) => write!(formatter, "X11 protocol error: {message}"),
             Self::Capture(message) => write!(formatter, "X11 frame capture failed: {message}"),

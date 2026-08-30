@@ -13,6 +13,13 @@ pub struct KeyEvent {
     pub modifiers: u8,
 }
 
+pub mod modifiers {
+    pub const SHIFT: u8 = 1 << 0;
+    pub const CONTROL: u8 = 1 << 1;
+    pub const ALT: u8 = 1 << 2;
+    pub const SUPER: u8 = 1 << 3;
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MouseButton {
     Left,

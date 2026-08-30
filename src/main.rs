@@ -4,11 +4,14 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use micro_gui::protocol::{InputEvent, ViewportMapping};
 use micro_gui::runtime::{ApplicationSpec, NativeSession};
-use micro_gui::terminal::KittyEncoder;
-use micro_gui::terminal::{DemoOptions, DoctorReport, render_demo};
+use micro_gui::terminal::{
+    DemoOptions, DoctorReport, KittyEncoder, TerminalAction, TerminalGuard, poll_action,
+    render_demo,
+};
 
 const HELP: &str = r#"micro-gui — GUI applications, without the desktop
 
@@ -153,22 +156,84 @@ fn run_application(options: RunOptions) -> Result<(), String> {
     ctrlc::set_handler(move || signal_flag.store(false, Ordering::SeqCst))
         .map_err(|error| format!("could not install Ctrl-C handler: {error}"))?;
 
+    let keyboard_enhanced = DoctorReport::detect().kitty_graphics_likely;
+    let terminal_guard = TerminalGuard::enter(keyboard_enhanced)
+        .map_err(|error| format!("terminal setup failed: {error}"))?;
+    let (reported_columns, reported_rows) = crossterm::terminal::size()
+        .map_err(|error| format!("terminal size query failed: {error}"))?;
+    let (mut columns, mut rows) = (reported_columns.max(1), reported_rows.max(1));
+    let (display_width, display_height) = session.display_size();
+    let mut mapping = ViewportMapping::new(
+        columns,
+        rows,
+        u32::from(display_width),
+        u32::from(display_height),
+    )
+    .expect("normalized terminal and display dimensions must be non-zero");
+
     let stdout = std::io::stdout();
     let mut encoder = KittyEncoder::new(stdout.lock());
+    let frame_interval = Duration::from_millis(100);
+    let mut next_frame = Instant::now();
     let render_result = (|| {
-        while running.load(Ordering::SeqCst)
+        'session: while running.load(Ordering::SeqCst)
             && session.is_running().map_err(|error| error.to_string())?
         {
-            let frame = session.capture().map_err(|error| error.to_string())?;
-            encoder
-                .transmit_rgb(&frame, 1)
-                .map_err(|error| format!("terminal frame write failed: {error}"))?;
-            thread::sleep(Duration::from_millis(100));
+            for action in poll_action(Duration::from_millis(5), keyboard_enhanced)
+                .map_err(|error| format!("terminal input failed: {error}"))?
+            {
+                match action {
+                    TerminalAction::Input(input) => {
+                        let input = map_terminal_input(input, mapping);
+                        session.inject(&input).map_err(|error| error.to_string())?;
+                    }
+                    TerminalAction::Resize {
+                        columns: new_columns,
+                        rows: new_rows,
+                    } => {
+                        let (new_columns, new_rows) = (new_columns.max(1), new_rows.max(1));
+                        if let Some(new_mapping) = ViewportMapping::new(
+                            new_columns,
+                            new_rows,
+                            u32::from(display_width),
+                            u32::from(display_height),
+                        ) {
+                            columns = new_columns;
+                            rows = new_rows;
+                            mapping = new_mapping;
+                            next_frame = Instant::now();
+                        }
+                    }
+                    TerminalAction::Quit => break 'session,
+                }
+            }
+
+            if Instant::now() >= next_frame {
+                let frame = session.capture().map_err(|error| error.to_string())?;
+                encoder
+                    .transmit_rgb_placed(&frame, 1, columns, rows)
+                    .map_err(|error| format!("terminal frame write failed: {error}"))?;
+                next_frame = Instant::now() + frame_interval;
+            } else {
+                thread::yield_now();
+            }
         }
         Ok(())
     })();
     let _ = encoder.delete(1);
+    drop(encoder);
+    drop(terminal_guard);
     render_result
+}
+
+fn map_terminal_input(input: InputEvent, mapping: ViewportMapping) -> InputEvent {
+    match input {
+        InputEvent::Mouse(mut mouse) => {
+            (mouse.x, mouse.y) = mapping.map_cell(mouse.x as u16, mouse.y as u16);
+            InputEvent::Mouse(mouse)
+        }
+        other => other,
+    }
 }
 
 #[cfg(test)]

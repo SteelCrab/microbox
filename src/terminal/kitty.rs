@@ -42,19 +42,47 @@ impl<W: Write> KittyEncoder<W> {
     }
 
     pub fn transmit_rgb(&mut self, frame: &Frame, image_id: u32) -> io::Result<()> {
+        self.transmit_rgb_inner(frame, image_id, None)
+    }
+
+    pub fn transmit_rgb_placed(
+        &mut self,
+        frame: &Frame,
+        image_id: u32,
+        columns: u16,
+        rows: u16,
+    ) -> io::Result<()> {
+        self.transmit_rgb_inner(frame, image_id, Some((columns.max(1), rows.max(1))))
+    }
+
+    fn transmit_rgb_inner(
+        &mut self,
+        frame: &Frame,
+        image_id: u32,
+        placement: Option<(u16, u16)>,
+    ) -> io::Result<()> {
         let encoded = encode_base64(frame.pixels());
         let chunks: Vec<&[u8]> = encoded.as_bytes().chunks(KITTY_CHUNK_SIZE).collect();
 
         for (index, chunk) in chunks.iter().enumerate() {
             let more = usize::from(index + 1 != chunks.len());
             if index == 0 {
-                write!(
-                    self.output,
-                    "\x1b_Ga=T,f=24,s={},v={},i={},q=1,m={more};",
-                    frame.width(),
-                    frame.height(),
-                    image_id
-                )?;
+                match placement {
+                    Some((columns, rows)) => write!(
+                        self.output,
+                        "\x1b_Ga=T,f=24,s={},v={},i={},q=1,c={columns},r={rows},m={more};",
+                        frame.width(),
+                        frame.height(),
+                        image_id
+                    )?,
+                    None => write!(
+                        self.output,
+                        "\x1b_Ga=T,f=24,s={},v={},i={},q=1,m={more};",
+                        frame.width(),
+                        frame.height(),
+                        image_id
+                    )?,
+                }
             } else {
                 write!(self.output, "\x1b_Gm={more};")?;
             }
@@ -132,5 +160,14 @@ mod tests {
         let bytes = encoder.into_inner();
         let text = String::from_utf8(bytes).unwrap();
         assert_eq!(text, "\x1b_Ga=T,f=24,s=1,v=1,i=7,q=1,m=0;/wAA\x1b\\");
+    }
+
+    #[test]
+    fn includes_terminal_placement_when_requested() {
+        let frame = Frame::new_rgb(1, 1, vec![0, 0, 0]).unwrap();
+        let mut encoder = KittyEncoder::new(Vec::new());
+        encoder.transmit_rgb_placed(&frame, 3, 80, 24).unwrap();
+        let text = String::from_utf8(encoder.into_inner()).unwrap();
+        assert!(text.starts_with("\x1b_Ga=T,f=24,s=1,v=1,i=3,q=1,c=80,r=24,m=0;"));
     }
 }

@@ -218,7 +218,12 @@ terminal resize 시에는 다음 순서를 사용합니다.
 - 첫 번째 viewable X11 window 탐색과 화면 크기 적용
 - X11 `GetImage` 및 TrueColor RGB24 변환
 - 10 FPS 전체 frame render loop와 `Ctrl-C` cleanup
+- raw/alternate-screen terminal guard와 SGR mouse capture
+- Kitty keyboard enhancement 및 일반 key fallback decoder
+- X11 keyboard mapping 기반 XTEST key/button/motion 주입
+- terminal resize 시 image placement와 입력 좌표 재계산
 
-`run`의 native capture 경로는 연결되었습니다. terminal input decoder와 XTEST
-입력 주입, resize 및 dirty-tile 전송은 아직 구현되지 않았습니다. Firecrab
-runtime을 선택하면 지원 예정이라는 명시적인 오류를 반환합니다.
+`run`의 native interactive 경로는 연결되었습니다. 현재 resize는 640×360 X
+framebuffer를 새 terminal cell 영역에 맞춰 표시하고 좌표를 다시 매핑합니다.
+X framebuffer 동적 resize와 dirty-tile 전송은 아직 구현되지 않았습니다.
+Firecrab runtime을 선택하면 지원 예정이라는 명시적인 오류를 반환합니다.

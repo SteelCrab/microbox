@@ -11,6 +11,7 @@ use nix::sys::signal::{Signal, killpg};
 use nix::unistd::Pid;
 
 use crate::display::{X11Display, X11Error};
+use crate::protocol::InputEvent;
 use crate::renderer::Frame;
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(3);
@@ -66,7 +67,8 @@ impl Xvfb {
                 "-noreset",
             ])
             .stdin(Stdio::null())
-            .stdout(Stdio::piped());
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
         let mut child = ManagedChild::spawn(&mut command)
             .map_err(|error| NativeError::StartXvfb(error.to_string()))?;
 
@@ -168,6 +170,14 @@ impl NativeSession {
         self.display.capture().map_err(NativeError::X11)
     }
 
+    pub fn inject(&self, event: &InputEvent) -> Result<(), NativeError> {
+        self.display.inject(event).map_err(NativeError::X11)
+    }
+
+    pub fn display_size(&self) -> (u16, u16) {
+        self.display.size()
+    }
+
     pub fn is_running(&mut self) -> Result<bool, NativeError> {
         self.application
             .child
@@ -178,6 +188,11 @@ impl NativeSession {
 
     pub fn display_name(&self) -> &str {
         self.xvfb.display_name()
+    }
+
+    #[cfg(test)]
+    fn pointer_position(&self) -> Result<(i16, i16), NativeError> {
+        self.display.pointer_position().map_err(NativeError::X11)
     }
 }
 
@@ -285,6 +300,8 @@ impl Error for NativeError {
 mod tests {
     use super::*;
 
+    static XVFB_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn rejects_empty_display_size_without_starting_xvfb() {
         assert!(matches!(
@@ -303,6 +320,7 @@ mod tests {
     #[test]
     #[ignore = "requires Xvfb and xeyes"]
     fn captures_xeyes_frame() {
+        let _test_lock = XVFB_TEST_LOCK.lock().unwrap();
         let spec = ApplicationSpec::new("xeyes", []);
         let session = NativeSession::start(&spec, 320, 180).unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
@@ -317,6 +335,49 @@ mod tests {
                 "xeyes did not draw a non-black frame"
             );
             thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    #[test]
+    #[ignore = "requires Xvfb and xeyes"]
+    fn injects_pointer_and_keyboard_events() {
+        use crate::protocol::{KeyEvent, MouseEvent, MouseKind};
+
+        let _test_lock = XVFB_TEST_LOCK.lock().unwrap();
+        let spec = ApplicationSpec::new("xeyes", []);
+        let session = NativeSession::start(&spec, 320, 180).unwrap();
+        session
+            .inject(&InputEvent::Mouse(MouseEvent {
+                x: 123,
+                y: 45,
+                button: None,
+                kind: MouseKind::Move,
+                modifiers: 0,
+            }))
+            .unwrap();
+        assert_eq!(session.pointer_position().unwrap(), (123, 45));
+
+        for kind in [MouseKind::Press, MouseKind::Release] {
+            session
+                .inject(&InputEvent::Mouse(MouseEvent {
+                    x: 123,
+                    y: 45,
+                    button: Some(crate::protocol::MouseButton::Left),
+                    kind,
+                    modifiers: 0,
+                }))
+                .unwrap();
+        }
+
+        for pressed in [true, false] {
+            session
+                .inject(&InputEvent::Key(KeyEvent {
+                    text: Some("a".into()),
+                    code: xkeysym::Keysym::from_char('a').raw(),
+                    pressed,
+                    modifiers: 0,
+                }))
+                .unwrap();
         }
     }
 }

@@ -7,8 +7,8 @@ Linux GUI application directly inside a terminal. It targets terminals that
 implement the Kitty Graphics Protocol and does not require a desktop
 environment, VNC, or RDP.
 
-> Status: pre-alpha. Native Xvfb application launch, X11 frame capture, and
-> Kitty Graphics output work. Keyboard and mouse input are the next milestone.
+> Status: pre-alpha. Native Xvfb launch, X11 capture, Kitty Graphics output,
+> keyboard/mouse forwarding, and terminal resize remapping are implemented.
 
 ## Why micro-gui?
 
@@ -53,7 +53,9 @@ micro-gui run my-app -- --application-argument
 
 `run` creates a private 640×360 Xvfb display, expands the first mapped window,
 captures the X11 root image at 10 FPS, and replaces image ID 1 in the terminal.
-Press `Ctrl-C` to stop the application and its Xvfb process group.
+The terminal enters an alternate screen with mouse tracking; keyboard and mouse
+events are forwarded through XTEST. Press `Ctrl-C` to stop the application and
+its Xvfb process group.
 
 The future Firecrab form remains reserved:
 
@@ -66,7 +68,7 @@ micro-gui run firefox --runtime firecrab
 - One foreground application per process
 - Linux and an X11/Xvfb display backend
 - Kitty Graphics full-frame output, followed by dirty-tile updates
-- Keyboard, mouse, and terminal-resize forwarding
+- Keyboard, mouse, and terminal-resize forwarding (fixed-size GUI framebuffer)
 - Deterministic cleanup when the application or client exits
 
 OCI images, background sessions (`ps`/`stop`), Wayland, and Firecrab are

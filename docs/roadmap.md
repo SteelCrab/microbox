@@ -39,16 +39,19 @@ cargo test runtime::native::tests::captures_xeyes_frame -- --ignored
 
 ## M2 — Interactive session
 
-- [ ] terminal raw/alternate-screen guard
-- [ ] Kitty keyboard event decoder
-- [ ] 일반 key event fallback
-- [ ] SGR mouse press/release/move decoder
-- [ ] XTEST key/button/motion 주입
-- [ ] `SIGWINCH` 기반 resize
-- [ ] `Ctrl-C`와 비정상 종료 복구
+- [x] terminal raw/alternate-screen guard
+- [x] Kitty keyboard event decoder
+- [x] 일반 key event fallback
+- [x] SGR mouse press/release/move decoder
+- [x] XTEST key/button/motion 주입
+- [x] `SIGWINCH` 기반 placement/좌표 resize
+- [x] `Ctrl-C`, `SIGTERM`, `SIGHUP` 종료 복구
 
 완료 조건: `xeyes`의 시선이 pointer를 따라가고 GTK Demo의 button과 text field를
 조작할 수 있습니다.
+
+자동 통합 테스트는 XTEST pointer 이동과 key press/release를 검증합니다. 실제
+Kitty 호환 terminal에서의 GTK Demo 수동 조작 확인은 release checklist에 남깁니다.
 
 ## M3 — Rendering efficiency
 
