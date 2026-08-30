@@ -54,4 +54,8 @@ fuzz_target!(|data: &[u8]| {
         }),
         false,
     );
+    let _ = decode_terminal_event(
+        Event::Paste(String::from_utf8_lossy(data).into_owned()),
+        false,
+    );
 });

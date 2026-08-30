@@ -3,9 +3,10 @@ use std::time::Duration;
 
 use crossterm::cursor::{Hide, MoveTo, Show};
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
-    KeyboardEnhancementFlags, MouseButton as CrosstermMouseButton, MouseEventKind,
-    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event, KeyCode, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
+    MouseButton as CrosstermMouseButton, MouseEventKind, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal::{
     Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -29,6 +30,7 @@ impl TerminalGuard {
                 output,
                 EnterAlternateScreen,
                 EnableMouseCapture,
+                EnableBracketedPaste,
                 Hide,
                 Clear(ClearType::All),
                 MoveTo(0, 0)
@@ -47,7 +49,13 @@ impl TerminalGuard {
         })();
 
         if let Err(error) = enter_result {
-            let _ = execute!(output, DisableMouseCapture, Show, LeaveAlternateScreen);
+            let _ = execute!(
+                output,
+                DisableBracketedPaste,
+                DisableMouseCapture,
+                Show,
+                LeaveAlternateScreen
+            );
             let _ = output.flush();
             let _ = disable_raw_mode();
             return Err(error);
@@ -62,7 +70,13 @@ impl Drop for TerminalGuard {
         if self.keyboard_enhanced {
             let _ = queue!(output, PopKeyboardEnhancementFlags);
         }
-        let _ = execute!(output, DisableMouseCapture, Show, LeaveAlternateScreen);
+        let _ = execute!(
+            output,
+            DisableBracketedPaste,
+            DisableMouseCapture,
+            Show,
+            LeaveAlternateScreen
+        );
         let _ = output.flush();
         let _ = disable_raw_mode();
     }
@@ -149,6 +163,9 @@ pub fn decode_terminal_event(event: Event, keyboard_enhanced: bool) -> Vec<Termi
             }
         }
         Event::Resize(columns, rows) => vec![TerminalAction::Resize { columns, rows }],
+        Event::Paste(text) if !text.is_empty() => {
+            vec![TerminalAction::Input(InputEvent::Text(text))]
+        }
         _ => Vec::new(),
     }
 }
@@ -267,5 +284,14 @@ mod tests {
                 ..
             }))
         ));
+    }
+
+    #[test]
+    fn bracketed_paste_is_one_utf8_text_event() {
+        let actions = decode_terminal_event(Event::Paste("한글\ntext".into()), false);
+        assert_eq!(
+            actions,
+            vec![TerminalAction::Input(InputEvent::Text("한글\ntext".into()))]
+        );
     }
 }

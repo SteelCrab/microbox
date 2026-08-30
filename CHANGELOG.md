@@ -14,10 +14,13 @@
 - Alpine `xeyes` OCI example for end-to-end smoke testing.
 - Add a user-private, PID-reuse-safe session registry and cross-terminal `ps`
   and `stop` commands.
+- Add bracketed UTF-8 paste, X11 clipboard selection serving, and a clipboard
+  fallback for composed text not present in the X11 keymap.
 
 ### Known limitations
 
 - Native mode is not a security sandbox.
 - One foreground application and the first mapped top-level window are supported.
 - The X11 framebuffer remains fixed at 640×360 during a session.
-- Firecrab, Wayland, detachable sessions, clipboard, and audio are not part of v0.1.
+- Firecrab, Wayland, detachable sessions, clipboard export, and audio are not
+  part of v0.1.

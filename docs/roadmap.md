@@ -90,4 +90,6 @@ Kitty 호환 terminal에서의 GTK Demo 수동 조작 확인은 release checklis
 3. Wayland/Weston backend
 4. [x] user-private session registry와 cross-terminal `ps`/`stop`
 5. [ ] detachable session daemon과 재연결
-6. [ ] clipboard, audio, 고급 keyboard/IME
+6. [x] terminal → GUI UTF-8 paste와 keymap 밖의 composed/IME text fallback
+7. [ ] opt-in GUI → terminal clipboard export
+8. [ ] audio — 공통 terminal audio protocol 부재로 transport 선정 필요

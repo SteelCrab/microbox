@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::fs::File;
@@ -6,19 +7,21 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use memmap2::{MmapMut, MmapOptions};
-use x11rb::CURRENT_TIME;
 use x11rb::connection::{Connection, RequestConnection};
 use x11rb::image::{BitsPerPixel, Image, ImageOrder, PixelLayout, ScanlinePad};
 use x11rb::protocol::Event;
 use x11rb::protocol::damage::{self, ConnectionExt as DamageConnectionExt};
 use x11rb::protocol::shm::{self, ConnectionExt as ShmConnectionExt};
 use x11rb::protocol::xproto::{
-    BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT, ConfigureWindowAux, ConnectionExt, ImageFormat,
-    InputFocus, KEY_PRESS_EVENT, KEY_RELEASE_EVENT, MOTION_NOTIFY_EVENT, MapState, Visualid,
-    Window,
+    Atom, AtomEnum, BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT, ConfigureWindowAux, ConnectionExt,
+    CreateWindowAux, EventMask, ImageFormat, InputFocus, KEY_PRESS_EVENT, KEY_RELEASE_EVENT,
+    MOTION_NOTIFY_EVENT, MapState, PropMode, SELECTION_NOTIFY_EVENT, SelectionNotifyEvent,
+    SelectionRequestEvent, Visualid, Window, WindowClass,
 };
 use x11rb::protocol::xtest::ConnectionExt as XTestConnectionExt;
 use x11rb::rust_connection::RustConnection;
+use x11rb::wrapper::ConnectionExt as WrapperConnectionExt;
+use x11rb::{COPY_DEPTH_FROM_PARENT, CURRENT_TIME, NONE};
 use xkeysym::key;
 
 use crate::protocol::modifiers;
@@ -34,6 +37,7 @@ pub struct X11Display {
     keyboard_map: KeyboardMap,
     shm_capture: Option<ShmCapture>,
     damage: Option<DamageTracker>,
+    clipboard: Clipboard,
 }
 
 impl X11Display {
@@ -62,6 +66,7 @@ impl X11Display {
             .ok()
             .flatten();
         let damage = DamageTracker::try_new(&connection, root).ok().flatten();
+        let clipboard = Clipboard::new(&connection, root)?;
 
         Ok(Self {
             connection,
@@ -72,6 +77,7 @@ impl X11Display {
             keyboard_map,
             shm_capture,
             damage,
+            clipboard,
         })
     }
 
@@ -189,10 +195,38 @@ impl X11Display {
     }
 
     pub fn frame_pending(&mut self) -> Result<bool, X11Error> {
-        match &mut self.damage {
-            Some(damage) => damage.take(&self.connection),
-            None => Ok(true),
+        let mut damaged = match &mut self.damage {
+            Some(damage) => std::mem::take(&mut damage.first_frame),
+            None => true,
+        };
+        while let Some(event) = self.connection.poll_for_event().map_err(connection_error)? {
+            match event {
+                Event::DamageNotify(notify) => {
+                    if self
+                        .damage
+                        .as_ref()
+                        .is_some_and(|damage| notify.damage == damage.id)
+                    {
+                        damaged = true;
+                    }
+                }
+                Event::SelectionRequest(request) => {
+                    self.clipboard.respond(&self.connection, request)?;
+                }
+                _ => {}
+            }
         }
+        if damaged {
+            if let Some(damage) = &self.damage {
+                self.connection
+                    .damage_subtract(damage.id, NONE, NONE)
+                    .map_err(connection_error)?
+                    .check()
+                    .map_err(reply_error)?;
+                self.connection.flush().map_err(connection_error)?;
+            }
+        }
+        Ok(damaged)
     }
 
     #[cfg(test)]
@@ -209,6 +243,7 @@ impl X11Display {
     pub fn inject(&self, event: &InputEvent) -> Result<(), X11Error> {
         match event {
             InputEvent::Key(event) => self.inject_key(event)?,
+            InputEvent::Text(text) => self.inject_text(text)?,
             InputEvent::Mouse(event) => self.inject_mouse(event)?,
             InputEvent::Resize { .. } => {}
         }
@@ -216,10 +251,17 @@ impl X11Display {
     }
 
     fn inject_key(&self, event: &KeyEvent) -> Result<(), X11Error> {
-        let keycode = self
-            .keyboard_map
-            .keycode_for(event.code)
-            .ok_or(X11Error::UnmappedKeysym(event.code))?;
+        let Some(keycode) = self.keyboard_map.keycode_for(event.code) else {
+            if event.modifiers & (modifiers::CONTROL | modifiers::ALT | modifiers::SUPER) == 0 {
+                if let Some(text) = &event.text {
+                    if event.pressed {
+                        return self.inject_text(text);
+                    }
+                    return Ok(());
+                }
+            }
+            return Err(X11Error::UnmappedKeysym(event.code));
+        };
         let modifier_keycodes = self.modifier_keycodes(event.modifiers)?;
 
         if event.pressed {
@@ -234,6 +276,22 @@ impl X11Display {
             }
             Ok(())
         }
+    }
+
+    fn inject_text(&self, text: &str) -> Result<(), X11Error> {
+        self.clipboard.set(&self.connection, text)?;
+        let control = self
+            .keyboard_map
+            .keycode_for(key::Control_L)
+            .ok_or(X11Error::UnmappedKeysym(key::Control_L))?;
+        let v = self
+            .keyboard_map
+            .keycode_for(key::v)
+            .ok_or(X11Error::UnmappedKeysym(key::v))?;
+        self.fake_key(control, true)?;
+        self.fake_key(v, true)?;
+        self.fake_key(v, false)?;
+        self.fake_key(control, false)
     }
 
     fn modifier_keycodes(&self, value: u8) -> Result<Vec<u8>, X11Error> {
@@ -324,6 +382,9 @@ impl X11Display {
 
 impl Drop for X11Display {
     fn drop(&mut self) {
+        if let Ok(cookie) = self.connection.destroy_window(self.clipboard.window) {
+            let _ = cookie.check();
+        }
         if let Some(damage) = &self.damage {
             if let Ok(cookie) = self.connection.damage_destroy(damage.id) {
                 let _ = cookie.check();
@@ -335,6 +396,144 @@ impl Drop for X11Display {
             }
         }
     }
+}
+
+const MAX_CLIPBOARD_BYTES: usize = 1024 * 1024;
+
+struct Clipboard {
+    window: Window,
+    atoms: ClipboardAtoms,
+    text: RefCell<Vec<u8>>,
+}
+
+impl Clipboard {
+    fn new(connection: &RustConnection, root: Window) -> Result<Self, X11Error> {
+        let window = connection
+            .generate_id()
+            .map_err(|error| X11Error::Protocol(error.to_string()))?;
+        connection
+            .create_window(
+                COPY_DEPTH_FROM_PARENT,
+                window,
+                root,
+                0,
+                0,
+                1,
+                1,
+                0,
+                WindowClass::INPUT_ONLY,
+                0,
+                &CreateWindowAux::new(),
+            )
+            .map_err(connection_error)?
+            .check()
+            .map_err(reply_error)?;
+        Ok(Self {
+            window,
+            atoms: ClipboardAtoms {
+                clipboard: intern_atom(connection, b"CLIPBOARD")?,
+                utf8_string: intern_atom(connection, b"UTF8_STRING")?,
+                targets: intern_atom(connection, b"TARGETS")?,
+                text: intern_atom(connection, b"TEXT")?,
+            },
+            text: RefCell::new(Vec::new()),
+        })
+    }
+
+    fn set(&self, connection: &RustConnection, text: &str) -> Result<(), X11Error> {
+        if text.len() > MAX_CLIPBOARD_BYTES {
+            return Err(X11Error::ClipboardTooLarge(text.len()));
+        }
+        self.text.replace(text.as_bytes().to_vec());
+        connection
+            .set_selection_owner(self.window, self.atoms.clipboard, CURRENT_TIME)
+            .map_err(connection_error)?
+            .check()
+            .map_err(reply_error)
+    }
+
+    fn respond(
+        &self,
+        connection: &RustConnection,
+        request: SelectionRequestEvent,
+    ) -> Result<(), X11Error> {
+        if request.selection != self.atoms.clipboard {
+            return Ok(());
+        }
+        let property = if request.property == NONE {
+            request.target
+        } else {
+            request.property
+        };
+        let accepted = if request.target == self.atoms.targets {
+            connection
+                .change_property32(
+                    PropMode::REPLACE,
+                    request.requestor,
+                    property,
+                    AtomEnum::ATOM,
+                    &[
+                        self.atoms.targets,
+                        self.atoms.utf8_string,
+                        self.atoms.text,
+                        AtomEnum::STRING.into(),
+                    ],
+                )
+                .map_err(connection_error)?
+                .check()
+                .map_err(reply_error)?;
+            true
+        } else if request.target == self.atoms.utf8_string
+            || request.target == self.atoms.text
+            || request.target == AtomEnum::STRING.into()
+        {
+            connection
+                .change_property8(
+                    PropMode::REPLACE,
+                    request.requestor,
+                    property,
+                    request.target,
+                    &self.text.borrow(),
+                )
+                .map_err(connection_error)?
+                .check()
+                .map_err(reply_error)?;
+            true
+        } else {
+            false
+        };
+        let notify = SelectionNotifyEvent {
+            response_type: SELECTION_NOTIFY_EVENT,
+            sequence: 0,
+            time: request.time,
+            requestor: request.requestor,
+            selection: request.selection,
+            target: request.target,
+            property: if accepted { property } else { NONE },
+        };
+        connection
+            .send_event(false, request.requestor, EventMask::NO_EVENT, notify)
+            .map_err(connection_error)?
+            .check()
+            .map_err(reply_error)?;
+        connection.flush().map_err(connection_error)
+    }
+}
+
+struct ClipboardAtoms {
+    clipboard: Atom,
+    utf8_string: Atom,
+    targets: Atom,
+    text: Atom,
+}
+
+fn intern_atom(connection: &RustConnection, name: &[u8]) -> Result<Atom, X11Error> {
+    connection
+        .intern_atom(false, name)
+        .map_err(connection_error)?
+        .reply()
+        .map(|reply| reply.atom)
+        .map_err(reply_error)
 }
 
 struct DamageTracker {
@@ -369,24 +568,6 @@ impl DamageTracker {
             id,
             first_frame: true,
         }))
-    }
-
-    fn take(&mut self, connection: &RustConnection) -> Result<bool, X11Error> {
-        let mut damaged = std::mem::take(&mut self.first_frame);
-        while let Some(event) = connection.poll_for_event().map_err(connection_error)? {
-            if matches!(event, Event::DamageNotify(ref notify) if notify.damage == self.id) {
-                damaged = true;
-            }
-        }
-        if damaged {
-            connection
-                .damage_subtract(self.id, x11rb::NONE, x11rb::NONE)
-                .map_err(connection_error)?
-                .check()
-                .map_err(reply_error)?;
-            connection.flush().map_err(connection_error)?;
-        }
-        Ok(damaged)
     }
 }
 
@@ -566,6 +747,7 @@ pub enum X11Error {
     InvalidKeyboardMap,
     UnmappedKeysym(u32),
     InvalidPointerCoordinate,
+    ClipboardTooLarge(usize),
     SharedImageTooLarge,
     SharedMemoryMap(String),
     InvalidSharedImageSize { expected: usize, actual: usize },
@@ -599,6 +781,10 @@ impl Display for X11Error {
             Self::InvalidPointerCoordinate => {
                 write!(formatter, "pointer coordinate exceeds X11 range")
             }
+            Self::ClipboardTooLarge(size) => write!(
+                formatter,
+                "clipboard payload is {size} bytes; the limit is {MAX_CLIPBOARD_BYTES} bytes"
+            ),
             Self::SharedImageTooLarge => write!(formatter, "shared X11 image is too large"),
             Self::SharedMemoryMap(message) => {
                 write!(formatter, "could not map X11 shared memory: {message}")

@@ -500,4 +500,77 @@ mod tests {
                 .unwrap();
         }
     }
+
+    #[test]
+    #[ignore = "requires Xvfb and xeyes"]
+    fn serves_utf8_clipboard_text() {
+        use x11rb::COPY_DEPTH_FROM_PARENT;
+        use x11rb::connection::Connection;
+        use x11rb::protocol::Event;
+        use x11rb::protocol::xproto::{AtomEnum, ConnectionExt, CreateWindowAux, WindowClass};
+
+        let _test_lock = lock_xvfb();
+        let spec = ApplicationSpec::new("xeyes", []);
+        let mut session = NativeSession::start(&spec, 320, 180).unwrap();
+        let expected = "micro-gui 한글 clipboard";
+        session.inject(&InputEvent::Text(expected.into())).unwrap();
+
+        let (connection, screen_number) = x11rb::connect(Some(session.display_name())).unwrap();
+        let root = connection.setup().roots[screen_number].root;
+        let window = connection.generate_id().unwrap();
+        connection
+            .create_window(
+                COPY_DEPTH_FROM_PARENT,
+                window,
+                root,
+                0,
+                0,
+                1,
+                1,
+                0,
+                WindowClass::INPUT_ONLY,
+                0,
+                &CreateWindowAux::new(),
+            )
+            .unwrap()
+            .check()
+            .unwrap();
+        let atom = |name: &[u8]| {
+            connection
+                .intern_atom(false, name)
+                .unwrap()
+                .reply()
+                .unwrap()
+                .atom
+        };
+        let clipboard = atom(b"CLIPBOARD");
+        let utf8 = atom(b"UTF8_STRING");
+        let property = atom(b"MICRO_GUI_TEST_CLIPBOARD");
+        connection
+            .convert_selection(window, clipboard, utf8, property, x11rb::CURRENT_TIME)
+            .unwrap()
+            .check()
+            .unwrap();
+        connection.flush().unwrap();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let _ = session.frame_pending().unwrap();
+            if let Some(Event::SelectionNotify(notify)) = connection.poll_for_event().unwrap() {
+                assert_eq!(notify.property, property);
+                let reply = connection
+                    .get_property(false, window, property, AtomEnum::ANY, 0, u32::MAX)
+                    .unwrap()
+                    .reply()
+                    .unwrap();
+                assert_eq!(reply.value, expected.as_bytes());
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "clipboard owner did not answer the request"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
 }

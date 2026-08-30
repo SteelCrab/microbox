@@ -1,6 +1,7 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputEvent {
     Key(KeyEvent),
+    Text(String),
     Mouse(MouseEvent),
     Resize { columns: u16, rows: u16 },
 }

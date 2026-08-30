@@ -89,6 +89,13 @@ The terminal enters an alternate screen with mouse tracking; keyboard and mouse
 events are forwarded through XTEST. Press `Ctrl-C` to stop the application and
 its Xvfb process group.
 
+Bracketed terminal paste is forwarded as one bounded UTF-8 X11 clipboard
+transfer followed by the application's normal paste shortcut. Characters that
+are not present in the X server keymap use the same path, so composed/IME text
+can reach GTK applications without reducing it to ASCII. Clipboard payloads are
+limited to 1 MiB. Automatic GUI-to-terminal clipboard export is intentionally
+not enabled.
+
 XDamage skips unchanged captures, MIT-SHM is used when available, and small
 changes are sent as 64-pixel tile overlays. The frame rate and render counters
 can be inspected with:
