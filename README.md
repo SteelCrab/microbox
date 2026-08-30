@@ -7,8 +7,8 @@ Linux GUI application directly inside a terminal. It targets terminals that
 implement the Kitty Graphics Protocol and does not require a desktop
 environment, VNC, or RDP.
 
-> Status: pre-alpha. Terminal frame transmission works as a standalone demo;
-> GUI capture and input injection are the next implementation milestone.
+> Status: pre-alpha. Native Xvfb application launch, X11 frame capture, and
+> Kitty Graphics output work. Keyboard and mouse input are the next milestone.
 
 ## Why micro-gui?
 
@@ -29,11 +29,13 @@ available for development and low-overhead use.
 Requirements:
 
 - Rust 1.85 or newer
+- Xvfb and the X11 application to run
 - Kitty, Ghostty, WezTerm, or another terminal implementing Kitty Graphics
 
 ```sh
 cargo run -- doctor
 cargo run -- demo
+cargo run -- run xeyes
 cargo test
 ```
 
@@ -41,16 +43,23 @@ cargo test
 Graphics Protocol. It verifies the first part of the rendering pipeline without
 starting an X server.
 
-The intended product interface is:
+The current native interface is:
 
 ```sh
 micro-gui run xeyes
 micro-gui run firefox
-micro-gui run firefox --runtime firecrab
+micro-gui run my-app -- --application-argument
 ```
 
-`run` is currently reserved and reports that the display backend is not yet
-connected; it does not silently start an application on the host display.
+`run` creates a private 640×360 Xvfb display, expands the first mapped window,
+captures the X11 root image at 10 FPS, and replaces image ID 1 in the terminal.
+Press `Ctrl-C` to stop the application and its Xvfb process group.
+
+The future Firecrab form remains reserved:
+
+```sh
+micro-gui run firefox --runtime firecrab
+```
 
 ## v0.1 scope
 

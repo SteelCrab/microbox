@@ -213,6 +213,12 @@ terminal resize 시에는 다음 순서를 사용합니다.
 - tile 단위 frame 변경 판별
 - terminal cell에서 frame pixel로의 좌표 변환
 - session 상태 전이 검증
+- `-displayfd`를 이용한 private Xvfb lifecycle
+- argv를 보존하는 native application process group
+- 첫 번째 viewable X11 window 탐색과 화면 크기 적용
+- X11 `GetImage` 및 TrueColor RGB24 변환
+- 10 FPS 전체 frame render loop와 `Ctrl-C` cleanup
 
-X11 display backend와 terminal input decoder가 연결되기 전까지 `run`은
-애플리케이션을 시작하지 않고 명시적인 오류를 반환합니다.
+`run`의 native capture 경로는 연결되었습니다. terminal input decoder와 XTEST
+입력 주입, resize 및 dirty-tile 전송은 아직 구현되지 않았습니다. Firecrab
+runtime을 선택하면 지원 예정이라는 명시적인 오류를 반환합니다.

@@ -20,16 +20,22 @@ cargo run -- demo
 
 ## M1 — X11 capture PoC
 
-- [ ] 사용 가능한 private display 번호 할당
-- [ ] Xvfb 실행과 readiness timeout
-- [ ] argv 기반 애플리케이션 실행
-- [ ] 최상위 window 탐색 및 root 크기에 맞춤
-- [ ] X11 `GetImage` capture
-- [ ] 10 FPS 전체 frame 출력
-- [ ] 종료 시 Xvfb와 application process group 정리
+- [x] 사용 가능한 private display 번호 할당
+- [x] Xvfb 실행과 readiness timeout
+- [x] argv 기반 애플리케이션 실행
+- [x] 최상위 window 탐색 및 root 크기에 맞춤
+- [x] X11 `GetImage` capture
+- [x] 10 FPS 전체 frame 출력
+- [x] 종료 시 Xvfb와 application process group 정리
 
 완료 조건: Kitty 호환 터미널에서 `micro-gui run xeyes` 화면이 지속적으로
 갱신됩니다. 아직 입력은 필요하지 않습니다.
+
+통합 검증은 system dependency가 필요하므로 기본 test suite와 분리합니다.
+
+```sh
+cargo test runtime::native::tests::captures_xeyes_frame -- --ignored
+```
 
 ## M2 — Interactive session
 

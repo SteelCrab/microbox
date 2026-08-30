@@ -1,0 +1,322 @@
+use std::error::Error;
+use std::ffi::{OsStr, OsString};
+use std::fmt::{self, Display, Formatter};
+use std::io::{BufRead, BufReader};
+use std::process::{Child, Command, Stdio};
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
+
+use nix::sys::signal::{Signal, killpg};
+use nix::unistd::Pid;
+
+use crate::display::{X11Display, X11Error};
+use crate::renderer::Frame;
+
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(3);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApplicationSpec {
+    program: OsString,
+    arguments: Vec<OsString>,
+}
+
+impl ApplicationSpec {
+    pub fn new(
+        program: impl Into<OsString>,
+        arguments: impl IntoIterator<Item = OsString>,
+    ) -> Self {
+        Self {
+            program: program.into(),
+            arguments: arguments.into_iter().collect(),
+        }
+    }
+
+    pub fn program(&self) -> &OsStr {
+        &self.program
+    }
+
+    pub fn arguments(&self) -> &[OsString] {
+        &self.arguments
+    }
+}
+
+pub struct Xvfb {
+    _process: ManagedChild,
+    display_name: String,
+}
+
+impl Xvfb {
+    pub fn start(width: u16, height: u16) -> Result<Self, NativeError> {
+        if width == 0 || height == 0 {
+            return Err(NativeError::InvalidDisplaySize { width, height });
+        }
+
+        let screen = format!("{width}x{height}x24");
+        let mut command = Command::new("Xvfb");
+        command
+            .args([
+                "-displayfd",
+                "1",
+                "-screen",
+                "0",
+                &screen,
+                "-nolisten",
+                "tcp",
+                "-noreset",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped());
+        let mut child = ManagedChild::spawn(&mut command)
+            .map_err(|error| NativeError::StartXvfb(error.to_string()))?;
+
+        let stdout = child
+            .child
+            .stdout
+            .take()
+            .ok_or(NativeError::MissingXvfbOutput)?;
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let reader = thread::spawn(move || {
+            let mut line = String::new();
+            let result = BufReader::new(stdout).read_line(&mut line).map(|_| line);
+            let _ = sender.send(result);
+        });
+
+        let line = match receiver.recv_timeout(STARTUP_TIMEOUT) {
+            Ok(Ok(line)) => line,
+            Ok(Err(error)) => {
+                child.terminate();
+                let _ = reader.join();
+                return Err(NativeError::ReadDisplayNumber(error.to_string()));
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                child.terminate();
+                let _ = reader.join();
+                return Err(NativeError::XvfbTimeout(STARTUP_TIMEOUT));
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                child.terminate();
+                let _ = reader.join();
+                return Err(NativeError::MissingXvfbOutput);
+            }
+        };
+        let _ = reader.join();
+
+        let display_number = match line.trim().parse::<u16>() {
+            Ok(display_number) => display_number,
+            Err(_) => {
+                child.terminate();
+                return Err(NativeError::InvalidDisplayNumber(line.trim().to_string()));
+            }
+        };
+
+        Ok(Self {
+            _process: child,
+            display_name: format!(":{display_number}"),
+        })
+    }
+
+    pub fn display_name(&self) -> &str {
+        &self.display_name
+    }
+}
+
+pub struct NativeSession {
+    application: ManagedChild,
+    display: X11Display,
+    xvfb: Xvfb,
+}
+
+impl NativeSession {
+    pub fn start(spec: &ApplicationSpec, width: u16, height: u16) -> Result<Self, NativeError> {
+        let xvfb = Xvfb::start(width, height)?;
+        let display = connect_with_retry(xvfb.display_name(), STARTUP_TIMEOUT)?;
+        let mut command = Command::new(spec.program());
+        command
+            .args(spec.arguments())
+            .env("DISPLAY", xvfb.display_name())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut application =
+            ManagedChild::spawn(&mut command).map_err(|error| NativeError::StartApplication {
+                program: spec.program().to_string_lossy().into_owned(),
+                message: error.to_string(),
+            })?;
+
+        let window = match display.wait_for_application_window(STARTUP_TIMEOUT) {
+            Ok(window) => window,
+            Err(error) => {
+                let early_exit = application.child.try_wait().ok().flatten();
+                application.terminate();
+                if let Some(status) = early_exit {
+                    return Err(NativeError::ApplicationExited(status.to_string()));
+                }
+                return Err(NativeError::X11(error));
+            }
+        };
+        display.fill_screen(window).map_err(NativeError::X11)?;
+
+        Ok(Self {
+            application,
+            display,
+            xvfb,
+        })
+    }
+
+    pub fn capture(&self) -> Result<Frame, NativeError> {
+        self.display.capture().map_err(NativeError::X11)
+    }
+
+    pub fn is_running(&mut self) -> Result<bool, NativeError> {
+        self.application
+            .child
+            .try_wait()
+            .map(|status| status.is_none())
+            .map_err(|error| NativeError::ApplicationStatus(error.to_string()))
+    }
+
+    pub fn display_name(&self) -> &str {
+        self.xvfb.display_name()
+    }
+}
+
+fn connect_with_retry(display_name: &str, timeout: Duration) -> Result<X11Display, NativeError> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match X11Display::connect(display_name) {
+            Ok(display) => return Ok(display),
+            Err(error) if std::time::Instant::now() < deadline => {
+                let _ = error;
+                thread::sleep(Duration::from_millis(25));
+            }
+            Err(error) => return Err(NativeError::X11(error)),
+        }
+    }
+}
+
+struct ManagedChild {
+    child: Child,
+}
+
+impl ManagedChild {
+    fn spawn(command: &mut Command) -> std::io::Result<Self> {
+        use std::os::unix::process::CommandExt;
+
+        command.process_group(0);
+        command.spawn().map(|child| Self { child })
+    }
+
+    fn terminate(&mut self) {
+        if self.child.try_wait().ok().flatten().is_none() {
+            let process_group = Pid::from_raw(self.child.id() as i32);
+            let _ = killpg(process_group, Signal::SIGKILL);
+        }
+        let _ = self.child.wait();
+    }
+}
+
+impl Drop for ManagedChild {
+    fn drop(&mut self) {
+        self.terminate();
+    }
+}
+
+#[derive(Debug)]
+pub enum NativeError {
+    InvalidDisplaySize { width: u16, height: u16 },
+    StartXvfb(String),
+    MissingXvfbOutput,
+    ReadDisplayNumber(String),
+    InvalidDisplayNumber(String),
+    XvfbTimeout(Duration),
+    StartApplication { program: String, message: String },
+    ApplicationExited(String),
+    ApplicationStatus(String),
+    X11(X11Error),
+}
+
+impl Display for NativeError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidDisplaySize { width, height } => {
+                write!(formatter, "invalid Xvfb display size {width}x{height}")
+            }
+            Self::StartXvfb(message) => write!(formatter, "could not start Xvfb: {message}"),
+            Self::MissingXvfbOutput => write!(formatter, "Xvfb did not report a display number"),
+            Self::ReadDisplayNumber(message) => {
+                write!(formatter, "could not read Xvfb display number: {message}")
+            }
+            Self::InvalidDisplayNumber(value) => {
+                write!(formatter, "Xvfb returned invalid display number '{value}'")
+            }
+            Self::XvfbTimeout(timeout) => write!(
+                formatter,
+                "Xvfb did not start within {:.1}s",
+                timeout.as_secs_f32()
+            ),
+            Self::StartApplication { program, message } => {
+                write!(formatter, "could not start '{program}': {message}")
+            }
+            Self::ApplicationExited(status) => {
+                write!(
+                    formatter,
+                    "application exited before mapping a window ({status})"
+                )
+            }
+            Self::ApplicationStatus(message) => {
+                write!(formatter, "could not read application status: {message}")
+            }
+            Self::X11(error) => Display::fmt(error, formatter),
+        }
+    }
+}
+
+impl Error for NativeError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::X11(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_empty_display_size_without_starting_xvfb() {
+        assert!(matches!(
+            Xvfb::start(0, 100),
+            Err(NativeError::InvalidDisplaySize { .. })
+        ));
+    }
+
+    #[test]
+    fn application_spec_keeps_arguments_separate() {
+        let spec = ApplicationSpec::new("viewer", [OsString::from("a file.png")]);
+        assert_eq!(spec.program(), OsStr::new("viewer"));
+        assert_eq!(spec.arguments(), [OsString::from("a file.png")]);
+    }
+
+    #[test]
+    #[ignore = "requires Xvfb and xeyes"]
+    fn captures_xeyes_frame() {
+        let spec = ApplicationSpec::new("xeyes", []);
+        let session = NativeSession::start(&spec, 320, 180).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let frame = session.capture().unwrap();
+            assert_eq!((frame.width(), frame.height()), (320, 180));
+            if frame.pixels().iter().any(|&byte| byte != 0) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "xeyes did not draw a non-black frame"
+            );
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
+}

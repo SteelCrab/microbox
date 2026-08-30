@@ -1,5 +1,13 @@
+use std::ffi::OsString;
+use std::io::IsTerminal;
 use std::process::ExitCode;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
+use std::time::Duration;
 
+use micro_gui::runtime::{ApplicationSpec, NativeSession};
+use micro_gui::terminal::KittyEncoder;
 use micro_gui::terminal::{DemoOptions, DoctorReport, render_demo};
 
 const HELP: &str = r#"micro-gui — GUI applications, without the desktop
@@ -13,7 +21,7 @@ Usage:
 Commands:
   doctor  Inspect terminal capabilities needed by micro-gui
   demo    Render a generated RGB frame with the Kitty Graphics Protocol
-  run     Reserved for the v0.1 GUI runtime (not connected yet)
+  run     Run one application on a private Xvfb display (native runtime)
 "#;
 
 fn main() -> ExitCode {
@@ -44,7 +52,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
             let options = parse_demo_options(&args[1..])?;
             render_demo(std::io::stdout().lock(), options).map_err(|error| error.to_string())
         }
-        "run" => parse_run(&args[1..]),
+        "run" => run_application(parse_run_options(&args[1..])?),
         "help" | "--help" | "-h" => {
             print!("{HELP}");
             Ok(())
@@ -81,14 +89,23 @@ fn parse_demo_options(args: &[String]) -> Result<DemoOptions, String> {
     Ok(options)
 }
 
-fn parse_run(args: &[String]) -> Result<(), String> {
+#[derive(Debug, PartialEq, Eq)]
+struct RunOptions {
+    application: String,
+    application_arguments: Vec<String>,
+    runtime: String,
+}
+
+fn parse_run_options(args: &[String]) -> Result<RunOptions, String> {
     let Some(application) = args.first() else {
         return Err("run requires an application".into());
     };
     let mut runtime = "native";
+    let mut application_arguments = Vec::new();
     let mut index = 1;
     while index < args.len() {
         if args[index] == "--" {
+            application_arguments.extend_from_slice(&args[index + 1..]);
             break;
         }
         if args[index] == "--runtime" {
@@ -107,9 +124,51 @@ fn parse_run(args: &[String]) -> Result<(), String> {
         ));
     }
 
-    Err(format!(
-        "'{application}' was not started: the {runtime} display backend is not connected yet; use 'micro-gui demo' to verify terminal rendering"
-    ))
+    Ok(RunOptions {
+        application: application.clone(),
+        application_arguments,
+        runtime: runtime.into(),
+    })
+}
+
+fn run_application(options: RunOptions) -> Result<(), String> {
+    if options.runtime == "firecrab" {
+        return Err("the firecrab runtime is planned after v0.1 and is not available yet".into());
+    }
+    if !std::io::stdout().is_terminal() {
+        return Err("stdout is not a terminal; run `micro-gui doctor` for details".into());
+    }
+
+    let spec = ApplicationSpec::new(
+        OsString::from(&options.application),
+        options
+            .application_arguments
+            .into_iter()
+            .map(OsString::from),
+    );
+    let mut session = NativeSession::start(&spec, 640, 360).map_err(|error| error.to_string())?;
+
+    let running = Arc::new(AtomicBool::new(true));
+    let signal_flag = Arc::clone(&running);
+    ctrlc::set_handler(move || signal_flag.store(false, Ordering::SeqCst))
+        .map_err(|error| format!("could not install Ctrl-C handler: {error}"))?;
+
+    let stdout = std::io::stdout();
+    let mut encoder = KittyEncoder::new(stdout.lock());
+    let render_result = (|| {
+        while running.load(Ordering::SeqCst)
+            && session.is_running().map_err(|error| error.to_string())?
+        {
+            let frame = session.capture().map_err(|error| error.to_string())?;
+            encoder
+                .transmit_rgb(&frame, 1)
+                .map_err(|error| format!("terminal frame write failed: {error}"))?;
+            thread::sleep(Duration::from_millis(100));
+        }
+        Ok(())
+    })();
+    let _ = encoder.delete(1);
+    render_result
 }
 
 #[cfg(test)]
@@ -131,7 +190,28 @@ mod tests {
 
     #[test]
     fn rejects_unknown_runtime() {
-        let error = parse_run(&["xeyes".into(), "--runtime".into(), "docker".into()]).unwrap_err();
+        let error =
+            parse_run_options(&["xeyes".into(), "--runtime".into(), "docker".into()]).unwrap_err();
         assert!(error.contains("unsupported runtime"));
+    }
+
+    #[test]
+    fn separates_application_arguments_after_double_dash() {
+        let options = parse_run_options(&[
+            "viewer".into(),
+            "--runtime".into(),
+            "native".into(),
+            "--".into(),
+            "a file.png".into(),
+        ])
+        .unwrap();
+        assert_eq!(
+            options,
+            RunOptions {
+                application: "viewer".into(),
+                application_arguments: vec!["a file.png".into()],
+                runtime: "native".into(),
+            }
+        );
     }
 }
