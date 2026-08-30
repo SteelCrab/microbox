@@ -18,6 +18,10 @@ use microbox::terminal::{
     poll_action, render_demo,
 };
 
+const MAX_FRAMEBUFFER_DIMENSION: u16 = 4096;
+const FALLBACK_CELL_WIDTH: u16 = 8;
+const FALLBACK_CELL_HEIGHT: u16 = 16;
+
 const HELP: &str = r#"microbox — GUI applications, without the desktop
 
 Usage:
@@ -195,6 +199,7 @@ fn run_application(options: RunOptions) -> Result<(), String> {
         return Err("stdout is not a terminal; run `microbox doctor` for details".into());
     }
 
+    let initial_geometry = terminal_geometry(None)?;
     let session_application = options.application.clone();
     let session_runtime = match options.runtime.as_str() {
         "docker" => "oci",
@@ -210,12 +215,24 @@ fn run_application(options: RunOptions) -> Result<(), String> {
         "native" => {
             let spec = ApplicationSpec::new(OsString::from(&options.application), arguments);
             GuiSession::Native(
-                NativeSession::start(&spec, 640, 360).map_err(|error| error.to_string())?,
+                NativeSession::start(
+                    &spec,
+                    initial_geometry.pixel_width,
+                    initial_geometry.pixel_height,
+                )
+                .map_err(|error| error.to_string())?,
             )
         }
         "oci" | "docker" => {
             let spec = OciApplicationSpec::new(options.application, arguments);
-            GuiSession::Oci(OciSession::start(&spec, 640, 360).map_err(|error| error.to_string())?)
+            GuiSession::Oci(
+                OciSession::start(
+                    &spec,
+                    initial_geometry.pixel_width,
+                    initial_geometry.pixel_height,
+                )
+                .map_err(|error| error.to_string())?,
+            )
         }
         "firecrab" => {
             let endpoint = options
@@ -227,9 +244,16 @@ fn run_application(options: RunOptions) -> Result<(), String> {
                 })?;
             let token = std::env::var("MICROBOX_AGENT_TOKEN")
                 .map_err(|_| "Firecrab runtime requires MICROBOX_AGENT_TOKEN".to_string())?;
-            GuiSession::Firecrab(
-                FirecrabSession::connect(&endpoint, &token).map_err(|error| error.to_string())?,
-            )
+            let mut session =
+                FirecrabSession::connect(&endpoint, &token).map_err(|error| error.to_string())?;
+            if session.display_size()
+                != (initial_geometry.pixel_width, initial_geometry.pixel_height)
+            {
+                session
+                    .resize(initial_geometry.pixel_width, initial_geometry.pixel_height)
+                    .map_err(|error| error.to_string())?;
+            }
+            GuiSession::Firecrab(session)
         }
         runtime => return Err(format!("unsupported runtime '{runtime}'")),
     };
@@ -246,10 +270,8 @@ fn run_application(options: RunOptions) -> Result<(), String> {
     let keyboard_enhanced = DoctorReport::detect().kitty_graphics_likely;
     let terminal_guard = TerminalGuard::enter(keyboard_enhanced)
         .map_err(|error| format!("terminal setup failed: {error}"))?;
-    let (reported_columns, reported_rows) = crossterm::terminal::size()
-        .map_err(|error| format!("terminal size query failed: {error}"))?;
-    let (mut columns, mut rows) = (reported_columns.max(1), reported_rows.max(1));
-    let (display_width, display_height) = session.display_size();
+    let (mut columns, mut rows) = (initial_geometry.columns, initial_geometry.rows);
+    let (mut display_width, mut display_height) = session.display_size();
     let mut mapping = ViewportMapping::new(
         columns,
         rows,
@@ -283,15 +305,19 @@ fn run_application(options: RunOptions) -> Result<(), String> {
                         columns: new_columns,
                         rows: new_rows,
                     } => {
-                        let (new_columns, new_rows) = (new_columns.max(1), new_rows.max(1));
+                        let geometry = terminal_geometry(Some((new_columns, new_rows)))?;
+                        session
+                            .resize(geometry.pixel_width, geometry.pixel_height)
+                            .map_err(|error| error.to_string())?;
+                        (display_width, display_height) = session.display_size();
                         if let Some(new_mapping) = ViewportMapping::new(
-                            new_columns,
-                            new_rows,
+                            geometry.columns,
+                            geometry.rows,
                             u32::from(display_width),
                             u32::from(display_height),
                         ) {
-                            columns = new_columns;
-                            rows = new_rows;
+                            columns = geometry.columns;
+                            rows = geometry.rows;
                             mapping = new_mapping;
                             renderer.resize(columns, rows);
                             force_capture = true;
@@ -332,13 +358,61 @@ fn run_application(options: RunOptions) -> Result<(), String> {
     render_result
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TerminalGeometry {
+    columns: u16,
+    rows: u16,
+    pixel_width: u16,
+    pixel_height: u16,
+}
+
+fn terminal_geometry(cell_override: Option<(u16, u16)>) -> Result<TerminalGeometry, String> {
+    let window = crossterm::terminal::window_size()
+        .map_err(|error| format!("terminal size query failed: {error}"))?;
+    let (columns, rows) = cell_override.unwrap_or((window.columns, window.rows));
+    Ok(geometry_from_measurements(
+        columns,
+        rows,
+        window.width,
+        window.height,
+    ))
+}
+
+fn geometry_from_measurements(
+    columns: u16,
+    rows: u16,
+    pixel_width: u16,
+    pixel_height: u16,
+) -> TerminalGeometry {
+    let columns = columns.max(1);
+    let rows = rows.max(1);
+    let pixel_width = if pixel_width == 0 {
+        columns.saturating_mul(FALLBACK_CELL_WIDTH)
+    } else {
+        pixel_width
+    };
+    let pixel_height = if pixel_height == 0 {
+        rows.saturating_mul(FALLBACK_CELL_HEIGHT)
+    } else {
+        pixel_height
+    };
+    TerminalGeometry {
+        columns,
+        rows,
+        pixel_width: pixel_width.clamp(1, MAX_FRAMEBUFFER_DIMENSION),
+        pixel_height: pixel_height.clamp(1, MAX_FRAMEBUFFER_DIMENSION),
+    }
+}
+
 fn run_agent_command(args: &[String]) -> Result<(), String> {
     let Some(application) = args.first() else {
         return Err("agent requires an application".into());
     };
     let mut listen = format!("0.0.0.0:{DEFAULT_AGENT_PORT}");
-    let mut width = 640;
-    let mut height = 360;
+    // The guest starts with a minimal bootstrap surface; the host supplies the
+    // terminal-derived dimensions before it renders the first frame.
+    let mut width = 1;
+    let mut height = 1;
     let mut fps = 30;
     let mut arguments = Vec::new();
     let mut index = 1;
@@ -476,6 +550,20 @@ impl GuiSession {
         }
     }
 
+    fn resize(&mut self, width: u16, height: u16) -> Result<(), String> {
+        match self {
+            Self::Native(session) => session
+                .resize(width, height)
+                .map_err(|error| error.to_string()),
+            Self::Oci(session) => session
+                .resize(width, height)
+                .map_err(|error| error.to_string()),
+            Self::Firecrab(session) => session
+                .resize(width, height)
+                .map_err(|error| error.to_string()),
+        }
+    }
+
     fn display_size(&self) -> (u16, u16) {
         match self {
             Self::Native(session) => session.display_size(),
@@ -559,6 +647,32 @@ mod tests {
         .unwrap();
         assert_eq!(options.width, 640);
         assert_eq!(options.height, 360);
+    }
+
+    #[test]
+    fn uses_terminal_pixels_and_cell_fallback_for_dynamic_geometry() {
+        assert_eq!(
+            geometry_from_measurements(100, 30, 1920, 1080),
+            TerminalGeometry {
+                columns: 100,
+                rows: 30,
+                pixel_width: 1920,
+                pixel_height: 1080,
+            }
+        );
+        assert_eq!(
+            geometry_from_measurements(100, 30, 0, 0),
+            TerminalGeometry {
+                columns: 100,
+                rows: 30,
+                pixel_width: 800,
+                pixel_height: 480,
+            }
+        );
+        assert_eq!(
+            geometry_from_measurements(0, 0, u16::MAX, u16::MAX).pixel_width,
+            4096
+        );
     }
 
     #[test]

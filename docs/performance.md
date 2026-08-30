@@ -2,7 +2,8 @@
 
 측정일: 2026-08-30  
 브랜치: `feat/m3-rendering-efficiency`  
-환경: Linux x86_64, Xvfb 640×360x24, `xeyes`, release build, pseudo-TTY
+환경: Linux x86_64, 당시 baseline Xvfb 640×360x24, `xeyes`, release build,
+pseudo-TTY (현재 runtime은 terminal 크기에 따라 동적으로 resize됨)
 
 ## Idle session
 

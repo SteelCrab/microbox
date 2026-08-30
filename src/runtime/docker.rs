@@ -90,6 +90,10 @@ impl OciSession {
         self.native.display_size()
     }
 
+    pub fn resize(&mut self, width: u16, height: u16) -> Result<(), OciError> {
+        self.native.resize(width, height).map_err(OciError::Session)
+    }
+
     pub fn is_running(&mut self) -> Result<bool, OciError> {
         self.native.is_running().map_err(OciError::Session)
     }

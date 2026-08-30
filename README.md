@@ -8,7 +8,7 @@ implement the Kitty Graphics Protocol and does not require a desktop
 environment, VNC, or RDP.
 
 > Status: pre-alpha. Native and Docker/OCI launch, X11 capture, Kitty Graphics
-> output, keyboard/mouse forwarding, and terminal resize remapping are
+> output, keyboard/mouse forwarding, and dynamic terminal-sized framebuffers are
 > implemented.
 
 ## Why microbox?
@@ -82,11 +82,15 @@ temporary fallback), are mode `0600`, and disappear on normal or signal-driven
 exit. This is cross-terminal control for foreground sessions; detachable
 rendering and re-attachment are not implemented.
 
-`run` creates a private 640×360 Xvfb display, expands the first mapped window,
-captures the X11 root image at up to 30 FPS, and renders it in the terminal.
-The terminal enters an alternate screen with mouse tracking; keyboard and mouse
-events are forwarded through XTEST. Press `Ctrl-C` to stop the application and
-its Xvfb process group.
+`run` creates a private Xvfb display sized from the terminal's reported pixel
+dimensions, expands the first mapped window, captures the X11 root image at up
+to 30 FPS, and renders it in the terminal. If a terminal reports only rows and
+columns, microbox derives a framebuffer from the cell grid. Live terminal
+resizes update the XRandR screen, application window, capture buffer, Kitty
+placement, and input mapping together. Each dimension is bounded to 4096
+pixels. The terminal enters an alternate screen with mouse tracking; keyboard
+and mouse events are forwarded through XTEST. Press `Ctrl-C` to stop the
+application and its Xvfb process group.
 
 Bracketed terminal paste is forwarded as one bounded UTF-8 X11 clipboard
 transfer followed by the application's normal paste shortcut. Characters that
@@ -120,7 +124,7 @@ authentication, port-forward configuration, and current control-plane boundary.
 - One foreground application per process
 - Linux and an X11/Xvfb display backend
 - Kitty Graphics full-frame and dirty-tile output
-- Keyboard, mouse, and terminal-resize forwarding (fixed-size GUI framebuffer)
+- Keyboard, mouse, and terminal-resize forwarding with a dynamic GUI framebuffer
 - Deterministic cleanup when the application or client exits
 
 OCI, session control, composed input, and Firecrab transport are implemented on

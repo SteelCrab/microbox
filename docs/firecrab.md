@@ -4,7 +4,7 @@ microbox includes both ends of the transport that Firecrab itself does not
 provide:
 
 - `microbox agent` runs inside the guest, owns Xvfb and the GUI application,
-  captures RGB frames, and accepts input events.
+captures RGB frames, and accepts input events.
 - `microbox run ... --runtime firecrab` connects to the agent through a
   Firecrab TCP port forward and renders those frames in the terminal.
 
@@ -13,6 +13,11 @@ frame through the normal frame allocation limits, and requires the first client
 message to authenticate with `MICROBOX_AGENT_TOKEN`. Use a random token and do
 not expose the forwarded port outside the host; the protocol is authenticated
 but is not encrypted.
+
+The host sends its terminal-derived pixel dimensions to the guest. Initial
+connection and every later terminal resize update the guest XRandR screen,
+application window, and capture buffer before the matching frame is rendered.
+Stale in-flight frames from the previous size are discarded.
 
 ## Guest image
 

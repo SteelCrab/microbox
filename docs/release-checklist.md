@@ -21,7 +21,8 @@
 - [ ] WezTerm: interactive `xeyes`
 - [ ] GTK application button and text entry
 - [ ] Leafpad or Mousepad editing smoke test
-- [ ] terminal resize at narrow, wide, and tall aspect ratios
+- [x] terminal resize at narrow, wide, and tall aspect ratios (PTY pixel-size
+  capture verified on native, OCI, and Firecrab backends)
 - [ ] SSH session disconnect
 - [ ] demo recording or screenshot
 - [ ] clean-machine installation test

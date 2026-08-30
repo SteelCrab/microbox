@@ -222,6 +222,7 @@ terminal resize 시에는 다음 순서를 사용합니다.
 - Kitty keyboard enhancement 및 일반 key fallback decoder
 - X11 keyboard mapping 기반 XTEST key/button/motion 주입
 - terminal resize 시 image placement와 입력 좌표 재계산
+- terminal pixel 크기에 맞춘 XRandR framebuffer/application window 동적 resize
 - XDamage 기반 변경 감지와 bounded frame clock
 - MIT-SHM capture 및 `GetImage` fallback
 - 64px dirty-tile overlay와 35% full-frame 임계값
@@ -230,7 +231,8 @@ terminal resize 시에는 다음 순서를 사용합니다.
 - broken pipe, application crash, Xvfb crash 회귀 테스트
 - frame/input fuzz harness와 CI
 
-`run`의 native interactive 경로는 연결되었습니다. 현재 resize는 640×360 X
-framebuffer를 새 terminal cell 영역에 맞춰 표시하고 좌표를 다시 매핑합니다.
-X framebuffer 동적 resize는 아직 구현되지 않았습니다.
-Firecrab runtime을 선택하면 지원 예정이라는 명시적인 오류를 반환합니다.
+`run`의 native interactive 경로는 연결되었습니다. 초기 framebuffer는 terminal이
+보고한 pixel 크기를 사용하며, pixel 정보가 없으면 cell grid에서 추론합니다.
+terminal resize 시 XRandR screen, application window, MIT-SHM capture buffer,
+Kitty placement와 입력 좌표를 한 번에 갱신합니다. 같은 resize event는 OCI와
+Firecrab guest agent에도 전달됩니다. 각 축은 4096 pixel 상한을 적용합니다.

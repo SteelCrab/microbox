@@ -45,6 +45,7 @@ cargo test runtime::native::tests::captures_xeyes_frame -- --ignored
 - [x] SGR mouse press/release/move decoder
 - [x] XTEST key/button/motion 주입
 - [x] `SIGWINCH` 기반 placement/좌표 resize
+- [x] terminal pixel 크기 기반 XRandR framebuffer/application 동적 resize
 - [x] `Ctrl-C`, `SIGTERM`, `SIGHUP` 종료 복구
 
 완료 조건: `xeyes`의 시선이 pointer를 따라가고 GTK Demo의 button과 text field를
@@ -87,6 +88,7 @@ Kitty 호환 terminal에서의 GTK Demo 수동 조작 확인은 release checklis
    disposable lifecycle)
 2. [x] Firecrab MicroVM GUI data plane — authenticated guest agent, frame/input
    wire protocol, host adapter
+   - [x] host terminal 해상도를 guest XRandR framebuffer에 동적으로 전파
    - [ ] Firecrab control-plane 자동화는 image/network/VM 삭제 정책 입력 필요
 3. Wayland/Weston backend
 4. [x] user-private session registry와 cross-terminal `ps`/`stop`

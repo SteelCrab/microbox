@@ -11,6 +11,7 @@ use x11rb::connection::{Connection, RequestConnection};
 use x11rb::image::{BitsPerPixel, Image, ImageOrder, PixelLayout, ScanlinePad};
 use x11rb::protocol::Event;
 use x11rb::protocol::damage::{self, ConnectionExt as DamageConnectionExt};
+use x11rb::protocol::randr::{ConnectionExt as RandrConnectionExt, Rotation, SetConfig};
 use x11rb::protocol::shm::{self, ConnectionExt as ShmConnectionExt};
 use x11rb::protocol::xproto::{
     Atom, AtomEnum, BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT, ConfigureWindowAux, ConnectionExt,
@@ -28,12 +29,15 @@ use crate::protocol::modifiers;
 use crate::protocol::{InputEvent, KeyEvent, MouseButton, MouseEvent, MouseKind};
 use crate::renderer::Frame;
 
+const MAX_DISPLAY_DIMENSION: u16 = 4096;
+
 pub struct X11Display {
     connection: RustConnection,
     root: Window,
     width: u16,
     height: u16,
     pixel_layout: PixelLayout,
+    root_depth: u8,
     keyboard_map: KeyboardMap,
     shm_capture: Option<ShmCapture>,
     damage: Option<DamageTracker>,
@@ -50,6 +54,7 @@ impl X11Display {
             .get(screen_number)
             .ok_or(X11Error::MissingScreen)?;
         let root = screen.root;
+        let root_depth = screen.root_depth;
         let width = screen.width_in_pixels;
         let height = screen.height_in_pixels;
         let visual = find_visual(&connection, screen_number, screen.root_visual)
@@ -61,8 +66,13 @@ impl X11Display {
             .map_err(connection_error)?
             .reply()
             .map_err(|error| X11Error::UnsupportedXTest(error.to_string()))?;
+        connection
+            .randr_query_version(1, 2)
+            .map_err(connection_error)?
+            .reply()
+            .map_err(|error| X11Error::UnsupportedRandr(error.to_string()))?;
         let keyboard_map = KeyboardMap::load(&connection)?;
-        let shm_capture = ShmCapture::try_new(&connection, width, height, screen.root_depth)
+        let shm_capture = ShmCapture::try_new(&connection, width, height, root_depth)
             .ok()
             .flatten();
         let damage = DamageTracker::try_new(&connection, root).ok().flatten();
@@ -74,6 +84,7 @@ impl X11Display {
             width,
             height,
             pixel_layout,
+            root_depth,
             keyboard_map,
             shm_capture,
             damage,
@@ -184,6 +195,74 @@ impl X11Display {
 
     pub fn size(&self) -> (u16, u16) {
         (self.width, self.height)
+    }
+
+    pub fn resize(&mut self, width: u16, height: u16) -> Result<(), X11Error> {
+        if width == 0
+            || height == 0
+            || width > MAX_DISPLAY_DIMENSION
+            || height > MAX_DISPLAY_DIMENSION
+        {
+            return Err(X11Error::InvalidDisplaySize(format!(
+                "dimensions must be between 1 and {MAX_DISPLAY_DIMENSION}, got {width}x{height}"
+            )));
+        }
+        Frame::rgb_buffer_len(u32::from(width), u32::from(height))
+            .map_err(|error| X11Error::InvalidDisplaySize(error.to_string()))?;
+        let millimeters = |pixels: u16| (u32::from(pixels) * 254 / 960).max(1);
+        let resources = self
+            .connection
+            .randr_get_screen_resources_current(self.root)
+            .map_err(connection_error)?
+            .reply()
+            .map_err(reply_error)?;
+        for crtc in resources.crtcs {
+            let reply = self
+                .connection
+                .randr_set_crtc_config(
+                    crtc,
+                    resources.timestamp,
+                    resources.config_timestamp,
+                    0,
+                    0,
+                    0,
+                    Rotation::ROTATE0,
+                    &[],
+                )
+                .map_err(connection_error)?
+                .reply()
+                .map_err(reply_error)?;
+            if reply.status != SetConfig::SUCCESS {
+                return Err(X11Error::Protocol(
+                    "XRandR could not detach the virtual output before resizing".into(),
+                ));
+            }
+        }
+        self.connection
+            .randr_set_screen_size(
+                self.root,
+                width,
+                height,
+                millimeters(width),
+                millimeters(height),
+            )
+            .map_err(connection_error)?
+            .check()
+            .map_err(reply_error)?;
+        self.connection.flush().map_err(connection_error)?;
+        self.width = width;
+        self.height = height;
+        if let Some(previous) = self.shm_capture.take() {
+            self.connection
+                .shm_detach(previous.segment)
+                .map_err(connection_error)?
+                .check()
+                .map_err(reply_error)?;
+        }
+        self.shm_capture = ShmCapture::try_new(&self.connection, width, height, self.root_depth)
+            .ok()
+            .flatten();
+        Ok(())
     }
 
     pub fn capture_method(&self) -> &'static str {
@@ -744,6 +823,8 @@ pub enum X11Error {
     MissingCaptureVisual(Visualid),
     UnsupportedVisual(String),
     UnsupportedXTest(String),
+    UnsupportedRandr(String),
+    InvalidDisplaySize(String),
     InvalidKeyboardMap,
     UnmappedKeysym(u32),
     InvalidPointerCoordinate,
@@ -770,6 +851,12 @@ impl Display for X11Error {
             }
             Self::UnsupportedXTest(message) => {
                 write!(formatter, "XTEST extension is unavailable: {message}")
+            }
+            Self::UnsupportedRandr(message) => {
+                write!(formatter, "XRandR extension is unavailable: {message}")
+            }
+            Self::InvalidDisplaySize(message) => {
+                write!(formatter, "invalid dynamic display size: {message}")
             }
             Self::InvalidKeyboardMap => write!(formatter, "X11 returned an invalid keyboard map"),
             Self::UnmappedKeysym(keysym) => {

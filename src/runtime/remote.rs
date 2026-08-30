@@ -120,6 +120,30 @@ impl FirecrabSession {
         (self.width, self.height)
     }
 
+    pub fn resize(&mut self, width: u16, height: u16) -> Result<(), FirecrabError> {
+        Frame::rgb_buffer_len(u32::from(width), u32::from(height))
+            .map_err(|error| FirecrabError::Protocol(error.to_string()))?;
+        write_client_message(
+            &mut self.writer,
+            &ClientMessage::Input(InputEvent::Resize { width, height }),
+        )?;
+        self.width = width;
+        self.height = height;
+        self.pending = false;
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            self.poll_messages()?;
+            if self.pending {
+                return Ok(());
+            }
+            if !self.running {
+                return Err(FirecrabError::Agent("agent exited while resizing".into()));
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        Err(FirecrabError::ResizeTimeout { width, height })
+    }
+
     pub fn is_running(&mut self) -> Result<bool, FirecrabError> {
         self.poll_messages()?;
         Ok(self.running)
@@ -144,9 +168,7 @@ impl FirecrabSession {
                     if (frame.width(), frame.height())
                         != (u32::from(self.width), u32::from(self.height))
                     {
-                        return Err(FirecrabError::Protocol(
-                            "frame dimensions changed during session".into(),
-                        ));
+                        continue;
                     }
                     self.latest = frame;
                     self.pending = true;
@@ -192,6 +214,7 @@ pub enum FirecrabError {
     Endpoint(String),
     Connect(String),
     HandshakeTimeout,
+    ResizeTimeout { width: u16, height: u16 },
     Agent(String),
     Protocol(String),
     Io(io::Error),
@@ -206,6 +229,12 @@ impl Display for FirecrabError {
                 write!(formatter, "could not connect to GUI agent: {message}")
             }
             Self::HandshakeTimeout => write!(formatter, "GUI agent handshake timed out"),
+            Self::ResizeTimeout { width, height } => {
+                write!(
+                    formatter,
+                    "GUI agent did not resize to {width}x{height} in time"
+                )
+            }
             Self::Agent(message) => write!(formatter, "GUI agent failed: {message}"),
             Self::Protocol(message) => write!(formatter, "GUI agent protocol error: {message}"),
             Self::Io(error) => Display::fmt(error, formatter),
@@ -267,15 +296,32 @@ mod tests {
                 &AgentMessage::Frame(Frame::new_rgb(2, 1, vec![1, 2, 3, 4, 5, 6]).unwrap()),
             )
             .unwrap();
-            loop {
-                let count = stream.read(&mut bytes).unwrap();
-                decoder.push(&bytes[..count]).unwrap();
-                if let Some(ClientMessage::Input(InputEvent::Key(event))) =
-                    decoder.next_client().unwrap()
-                {
-                    assert_eq!(event.code, 42);
+            let mut received_key = false;
+            let mut received_resize = false;
+            while !received_key || !received_resize {
+                while let Some(message) = decoder.next_client().unwrap() {
+                    match message {
+                        ClientMessage::Input(InputEvent::Key(event)) => {
+                            assert_eq!(event.code, 42);
+                            received_key = true;
+                        }
+                        ClientMessage::Input(InputEvent::Resize { width, height }) => {
+                            assert_eq!((width, height), (3, 2));
+                            write_agent_message(
+                                &mut stream,
+                                &AgentMessage::Frame(Frame::new_rgb(3, 2, vec![7; 18]).unwrap()),
+                            )
+                            .unwrap();
+                            received_resize = true;
+                        }
+                        other => panic!("unexpected client message: {other:?}"),
+                    }
+                }
+                if received_key && received_resize {
                     break;
                 }
+                let count = stream.read(&mut bytes).unwrap();
+                decoder.push(&bytes[..count]).unwrap();
             }
         });
 
@@ -290,6 +336,9 @@ mod tests {
                 modifiers: 0,
             }))
             .unwrap();
+        session.resize(3, 2).unwrap();
+        assert_eq!(session.display_size(), (3, 2));
+        assert_eq!(session.capture().unwrap().pixels(), &[7; 18]);
         agent.join().unwrap();
     }
 

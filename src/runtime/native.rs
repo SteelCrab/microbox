@@ -18,6 +18,7 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(3);
 const APPLICATION_WINDOW_TIMEOUT: Duration = Duration::from_secs(15);
 const APPLICATION_REDRAW_TIMEOUT: Duration = Duration::from_millis(500);
 const APPLICATION_DRAW_SETTLE: Duration = Duration::from_millis(25);
+const MAX_DISPLAY_DIMENSION: u16 = 4096;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApplicationSpec {
@@ -52,11 +53,15 @@ pub struct Xvfb {
 
 impl Xvfb {
     pub fn start(width: u16, height: u16) -> Result<Self, NativeError> {
-        if width == 0 || height == 0 {
+        if width == 0
+            || height == 0
+            || width > MAX_DISPLAY_DIMENSION
+            || height > MAX_DISPLAY_DIMENSION
+        {
             return Err(NativeError::InvalidDisplaySize { width, height });
         }
 
-        let screen = format!("{width}x{height}x24");
+        let screen = format!("{MAX_DISPLAY_DIMENSION}x{MAX_DISPLAY_DIMENSION}x24");
         let mut command = Command::new("Xvfb");
         command
             .args([
@@ -129,6 +134,7 @@ impl Xvfb {
 pub struct NativeSession {
     application: ManagedChild,
     display: X11Display,
+    application_window: x11rb::protocol::xproto::Window,
     xvfb: Xvfb,
 }
 
@@ -150,6 +156,7 @@ impl NativeSession {
     ) -> Result<Self, NativeError> {
         let xvfb = Xvfb::start(width, height)?;
         let mut display = connect_with_retry(xvfb.display_name(), STARTUP_TIMEOUT)?;
+        display.resize(width, height).map_err(NativeError::X11)?;
         let mut command = build(xvfb.display_name());
         let mut application =
             ManagedChild::spawn(&mut command).map_err(|error| NativeError::StartApplication {
@@ -170,18 +177,12 @@ impl NativeSession {
         };
         let _ = display.frame_pending().map_err(NativeError::X11)?;
         display.fill_screen(window).map_err(NativeError::X11)?;
-        let redraw_deadline = std::time::Instant::now() + APPLICATION_REDRAW_TIMEOUT;
-        while std::time::Instant::now() < redraw_deadline {
-            if display.frame_pending().map_err(NativeError::X11)? {
-                thread::sleep(APPLICATION_DRAW_SETTLE);
-                break;
-            }
-            thread::sleep(Duration::from_millis(5));
-        }
+        wait_for_application_redraw(&mut display)?;
 
         Ok(Self {
             application,
             display,
+            application_window: window,
             xvfb,
         })
     }
@@ -204,6 +205,17 @@ impl NativeSession {
 
     pub fn display_size(&self) -> (u16, u16) {
         self.display.size()
+    }
+
+    pub fn resize(&mut self, width: u16, height: u16) -> Result<(), NativeError> {
+        self.display
+            .resize(width, height)
+            .map_err(NativeError::X11)?;
+        let _ = self.display.frame_pending().map_err(NativeError::X11)?;
+        self.display
+            .fill_screen(self.application_window)
+            .map_err(NativeError::X11)?;
+        wait_for_application_redraw(&mut self.display)
     }
 
     pub fn is_running(&mut self) -> Result<bool, NativeError> {
@@ -232,6 +244,18 @@ impl NativeSession {
     fn kill_xvfb(&mut self) {
         self.xvfb._process.terminate();
     }
+}
+
+fn wait_for_application_redraw(display: &mut X11Display) -> Result<(), NativeError> {
+    let redraw_deadline = std::time::Instant::now() + APPLICATION_REDRAW_TIMEOUT;
+    while std::time::Instant::now() < redraw_deadline {
+        if display.frame_pending().map_err(NativeError::X11)? {
+            thread::sleep(APPLICATION_DRAW_SETTLE);
+            break;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    Ok(())
 }
 
 fn configure_x11_command(command: &mut Command, display_name: &str) {
@@ -362,6 +386,10 @@ mod tests {
             Xvfb::start(0, 100),
             Err(NativeError::InvalidDisplaySize { .. })
         ));
+        assert!(matches!(
+            Xvfb::start(MAX_DISPLAY_DIMENSION + 1, 100),
+            Err(NativeError::InvalidDisplaySize { .. })
+        ));
     }
 
     #[test]
@@ -390,6 +418,42 @@ mod tests {
                 "xeyes did not draw a non-black frame"
             );
             thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    #[test]
+    #[ignore = "requires Xvfb and xeyes"]
+    fn dynamically_resizes_xeyes_frame() {
+        let _test_lock = lock_xvfb();
+        let spec = ApplicationSpec::new("xeyes", []);
+        let mut session = NativeSession::start(&spec, 320, 180).unwrap();
+        for (width, height) in [(800, 480), (427, 263), (1280, 720)] {
+            session.resize(width, height).unwrap();
+            assert_eq!(session.display_size(), (width, height));
+            let frame = session.capture().unwrap();
+            assert_eq!(
+                (frame.width(), frame.height()),
+                (width.into(), height.into())
+            );
+            assert_eq!(
+                frame.pixels().len(),
+                usize::from(width) * usize::from(height) * 3
+            );
+            let extends_into_resized_area =
+                frame
+                    .pixels()
+                    .chunks_exact(3)
+                    .enumerate()
+                    .any(|(index, pixel)| {
+                        let x = index % usize::from(width);
+                        let y = index / usize::from(width);
+                        (x > usize::from(width) * 3 / 4 || y > usize::from(height) * 3 / 4)
+                            && pixel.iter().any(|&channel| channel != 0)
+                    });
+            assert!(
+                extends_into_resized_area,
+                "application did not redraw into the resized {width}x{height} area"
+            );
         }
     }
 

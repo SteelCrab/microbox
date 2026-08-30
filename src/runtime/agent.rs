@@ -61,6 +61,7 @@ pub fn run_agent(config: AgentConfig) -> Result<(), AgentError> {
     let mut next_frame = Instant::now() + interval;
     let mut decoder = WireDecoder::default();
     let mut bytes = [0; 64 * 1024];
+    let mut force_frame = false;
 
     while running.load(Ordering::SeqCst) && session.is_running()? {
         loop {
@@ -73,14 +74,20 @@ pub fn run_agent(config: AgentConfig) -> Result<(), AgentError> {
         }
         while let Some(message) = decoder.next_client()? {
             match message {
+                ClientMessage::Input(crate::protocol::InputEvent::Resize { width, height }) => {
+                    session.resize(width, height)?;
+                    force_frame = true;
+                }
                 ClientMessage::Input(input) => session.inject(&input)?,
                 ClientMessage::Stop => return Ok(()),
                 ClientMessage::Authenticate(_) => return Err(AgentError::DuplicateAuth),
             }
         }
         if Instant::now() >= next_frame {
-            if session.frame_pending()? {
+            let damaged = session.frame_pending()?;
+            if force_frame || damaged {
                 write_agent_message(&mut stream, &AgentMessage::Frame(session.capture()?))?;
+                force_frame = false;
             }
             next_frame = Instant::now() + interval;
         } else {

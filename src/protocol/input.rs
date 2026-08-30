@@ -3,7 +3,7 @@ pub enum InputEvent {
     Key(KeyEvent),
     Text(String),
     Mouse(MouseEvent),
-    Resize { columns: u16, rows: u16 },
+    Resize { width: u16, height: u16 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

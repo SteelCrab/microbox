@@ -16,7 +16,8 @@ const AUTH: u8 = 10;
 const INPUT_KEY: u8 = 11;
 const INPUT_TEXT: u8 = 12;
 const INPUT_MOUSE: u8 = 13;
-const STOP: u8 = 14;
+const INPUT_RESIZE: u8 = 14;
+const STOP: u8 = 15;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentMessage {
@@ -94,8 +95,11 @@ pub fn write_client_message(
             payload.push(event.modifiers);
             (INPUT_MOUSE, payload)
         }
-        ClientMessage::Input(InputEvent::Resize { .. }) => {
-            return Err(WireError::Unsupported("resize input"));
+        ClientMessage::Input(InputEvent::Resize { width, height }) => {
+            let mut payload = Vec::with_capacity(4);
+            payload.extend_from_slice(&width.to_be_bytes());
+            payload.extend_from_slice(&height.to_be_bytes());
+            (INPUT_RESIZE, payload)
         }
         ClientMessage::Stop => (STOP, Vec::new()),
     };
@@ -222,6 +226,10 @@ impl WireDecoder {
                     modifiers: payload[10],
                 }))
             }
+            INPUT_RESIZE if payload.len() == 4 => ClientMessage::Input(InputEvent::Resize {
+                width: u16::from_be_bytes(payload[0..2].try_into().unwrap()),
+                height: u16::from_be_bytes(payload[2..4].try_into().unwrap()),
+            }),
             STOP if payload.is_empty() => ClientMessage::Stop,
             _ => {
                 return Err(WireError::InvalidMessage(format!(
@@ -302,6 +310,10 @@ mod tests {
                 kind: MouseKind::Press,
                 modifiers: 0,
             })),
+            ClientMessage::Input(InputEvent::Resize {
+                width: 800,
+                height: 600,
+            }),
             ClientMessage::Stop,
         ];
         let mut bytes = Vec::new();
