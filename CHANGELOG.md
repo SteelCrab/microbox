@@ -4,6 +4,9 @@
 
 ### Added
 
+- Add macOS host support for Apple Silicon and Intel through Docker Desktop OCI
+  agent images and the Firecrab transport, with loopback-only authenticated
+  ports, macOS PID-reuse-safe session tracking, platform diagnostics, and CI.
 - Rename the project, crate, binary, runtime paths, environment variables,
   container prefixes, examples, and documentation from the former name to
   `microbox`.
@@ -13,6 +16,8 @@
 - Keyboard, mouse, resize, and signal handling.
 - Dynamic framebuffer sizing from terminal pixel dimensions, including live
   XRandR resize propagation through native, OCI, and Firecrab sessions.
+- Opt-in `--debug`/`MICROBOX_DEBUG` session tracing for platform, runtime,
+  geometry, lifecycle, resize, and rendering diagnostics without token output.
 - Runtime diagnostics, FPS control, render statistics, smoke tests, and fuzz harness.
 - Docker-backed OCI sessions with automatic image-reference detection, private
   X11 socket sharing, missing-image pulls, and deterministic container cleanup.

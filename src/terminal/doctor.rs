@@ -4,6 +4,8 @@ use std::io::{IsTerminal, stdout};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DoctorReport {
+    pub host_os: &'static str,
+    pub host_arch: &'static str,
     pub stdout_is_terminal: bool,
     pub term: Option<String>,
     pub terminal_program: Option<String>,
@@ -21,6 +23,8 @@ impl DoctorReport {
             });
 
         Self {
+            host_os: env::consts::OS,
+            host_arch: env::consts::ARCH,
             stdout_is_terminal: stdout().is_terminal(),
             term,
             terminal_program,
@@ -32,6 +36,31 @@ impl DoctorReport {
 impl Display for DoctorReport {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         writeln!(formatter, "microbox doctor")?;
+        writeln!(
+            formatter,
+            "  host                  {}/{}",
+            self.host_os, self.host_arch
+        )?;
+        writeln!(
+            formatter,
+            "  native runtime        {}",
+            if self.host_os == "linux" {
+                "available with Xvfb"
+            } else if self.host_os == "macos" {
+                "unavailable (use OCI or Firecrab)"
+            } else {
+                "unsupported"
+            }
+        )?;
+        writeln!(
+            formatter,
+            "  OCI runtime           {}",
+            if self.host_os == "macos" {
+                "Docker agent transport"
+            } else {
+                "Docker/X11"
+            }
+        )?;
         writeln!(
             formatter,
             "  stdout is a TTY       {}",

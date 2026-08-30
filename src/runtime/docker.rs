@@ -1,13 +1,18 @@
 use std::error::Error;
 use std::ffi::{OsStr, OsString};
 use std::fmt::{self, Display, Formatter};
+use std::io::Read;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use crate::protocol::InputEvent;
 use crate::renderer::Frame;
 
-use super::{NativeError, NativeSession};
+#[cfg(target_os = "linux")]
+use super::NativeSession;
+use super::{FirecrabError, FirecrabSession, NativeError};
 
 static CONTAINER_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
@@ -43,8 +48,14 @@ impl OciApplicationSpec {
 }
 
 pub struct OciSession {
-    native: NativeSession,
+    backend: OciBackend,
     cleanup: ContainerCleanup,
+}
+
+enum OciBackend {
+    #[cfg(target_os = "linux")]
+    Native(Box<NativeSession>),
+    Agent(FirecrabSession),
 }
 
 impl OciSession {
@@ -58,44 +69,88 @@ impl OciSession {
             name: container_name.clone(),
             armed: true,
         };
-        let native = NativeSession::start_with_command(
-            width,
-            height,
-            OsStr::new(&spec.image),
-            |display_name| docker_run_command(spec, &container_name, display_name),
-        );
+        let backend = start_backend(spec, &container_name, width, height);
 
-        match native {
-            Ok(native) => Ok(Self { native, cleanup }),
+        match backend {
+            Ok(backend) => Ok(Self { backend, cleanup }),
             Err(error) => {
                 drop(cleanup);
-                Err(OciError::Session(error))
+                Err(error)
+            }
+        }
+    }
+
+    pub fn start_agent(
+        spec: &OciApplicationSpec,
+        width: u16,
+        height: u16,
+    ) -> Result<Self, OciError> {
+        verify_engine(&spec.engine)?;
+        ensure_image(&spec.engine, &spec.image)?;
+
+        let container_name = container_name();
+        let cleanup = ContainerCleanup {
+            engine: spec.engine.clone(),
+            name: container_name.clone(),
+            armed: true,
+        };
+        match start_agent_backend(spec, &container_name, width, height) {
+            Ok(backend) => Ok(Self { backend, cleanup }),
+            Err(error) => {
+                drop(cleanup);
+                Err(error)
             }
         }
     }
 
     pub fn capture(&mut self) -> Result<Frame, OciError> {
-        self.native.capture().map_err(OciError::Session)
+        match &mut self.backend {
+            #[cfg(target_os = "linux")]
+            OciBackend::Native(session) => session.capture().map_err(OciError::Session),
+            OciBackend::Agent(session) => session.capture().map_err(OciError::Transport),
+        }
     }
 
     pub fn frame_pending(&mut self) -> Result<bool, OciError> {
-        self.native.frame_pending().map_err(OciError::Session)
+        match &mut self.backend {
+            #[cfg(target_os = "linux")]
+            OciBackend::Native(session) => session.frame_pending().map_err(OciError::Session),
+            OciBackend::Agent(session) => session.frame_pending().map_err(OciError::Transport),
+        }
     }
 
-    pub fn inject(&self, event: &InputEvent) -> Result<(), OciError> {
-        self.native.inject(event).map_err(OciError::Session)
+    pub fn inject(&mut self, event: &InputEvent) -> Result<(), OciError> {
+        match &mut self.backend {
+            #[cfg(target_os = "linux")]
+            OciBackend::Native(session) => session.inject(event).map_err(OciError::Session),
+            OciBackend::Agent(session) => session.inject(event).map_err(OciError::Transport),
+        }
     }
 
     pub fn display_size(&self) -> (u16, u16) {
-        self.native.display_size()
+        match &self.backend {
+            #[cfg(target_os = "linux")]
+            OciBackend::Native(session) => session.display_size(),
+            OciBackend::Agent(session) => session.display_size(),
+        }
     }
 
     pub fn resize(&mut self, width: u16, height: u16) -> Result<(), OciError> {
-        self.native.resize(width, height).map_err(OciError::Session)
+        match &mut self.backend {
+            #[cfg(target_os = "linux")]
+            OciBackend::Native(session) => session.resize(width, height).map_err(OciError::Session),
+            OciBackend::Agent(session) => {
+                session.resize(width, height).map_err(OciError::Transport)
+            }
+        }
     }
 
     pub fn is_running(&mut self) -> Result<bool, OciError> {
-        self.native.is_running().map_err(OciError::Session)
+        match &mut self.backend {
+            #[cfg(target_os = "linux")]
+            OciBackend::Native(session) => session.is_running().map_err(OciError::Session),
+            OciBackend::Agent(session) => session.is_running().map_err(OciError::Transport),
+        }
     }
 
     pub fn container_name(&self) -> &str {
@@ -103,6 +158,61 @@ impl OciSession {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn start_backend(
+    spec: &OciApplicationSpec,
+    container_name: &str,
+    width: u16,
+    height: u16,
+) -> Result<OciBackend, OciError> {
+    NativeSession::start_with_command(width, height, OsStr::new(&spec.image), |display_name| {
+        docker_run_command(spec, container_name, display_name)
+    })
+    .map(Box::new)
+    .map(OciBackend::Native)
+    .map_err(OciError::Session)
+}
+
+#[cfg(target_os = "macos")]
+fn start_backend(
+    spec: &OciApplicationSpec,
+    container_name: &str,
+    width: u16,
+    height: u16,
+) -> Result<OciBackend, OciError> {
+    start_agent_backend(spec, container_name, width, height)
+}
+
+fn start_agent_backend(
+    spec: &OciApplicationSpec,
+    container_name: &str,
+    width: u16,
+    height: u16,
+) -> Result<OciBackend, OciError> {
+    let token = random_token()?;
+    let output = docker_agent_command(spec, container_name, &token)
+        .output()
+        .map_err(|error| OciError::StartAgent(error.to_string()))?;
+    if !output.status.success() {
+        return Err(OciError::StartAgent(output_message(&output.stderr)));
+    }
+
+    let endpoint = published_agent_endpoint(&spec.engine, container_name)?;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut last_error = None;
+    while Instant::now() < deadline {
+        match FirecrabSession::connect(&endpoint, &token, width, height) {
+            Ok(session) => return Ok(OciBackend::Agent(session)),
+            Err(error) => last_error = Some(error.to_string()),
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    Err(OciError::AgentUnavailable(last_error.unwrap_or_else(
+        || "the image must start `microbox agent` and expose TCP port 5943".into(),
+    )))
+}
+
+#[cfg(target_os = "linux")]
 fn docker_run_command(spec: &OciApplicationSpec, name: &str, display_name: &str) -> Command {
     let socket = x11_socket_path(display_name);
     let mut command = Command::new(&spec.engine);
@@ -127,6 +237,84 @@ fn docker_run_command(spec: &OciApplicationSpec, name: &str, display_name: &str)
     command
 }
 
+fn docker_agent_command(spec: &OciApplicationSpec, name: &str, token: &str) -> Command {
+    let mut command = Command::new(&spec.engine);
+    command
+        .arg("run")
+        .arg("--detach")
+        .arg("--rm")
+        .arg("--name")
+        .arg(name)
+        .arg("--env")
+        .arg(format!("MICROBOX_AGENT_TOKEN={token}"))
+        .arg("--publish")
+        .arg(format!(
+            "127.0.0.1::{}",
+            crate::protocol::DEFAULT_AGENT_PORT
+        ))
+        .arg("--security-opt")
+        .arg("no-new-privileges")
+        .arg(&spec.image)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if !spec.arguments.is_empty() {
+        command.arg("--").args(&spec.arguments);
+    }
+    command
+}
+
+fn random_token() -> Result<String, OciError> {
+    let mut bytes = [0u8; 32];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut file| file.read_exact(&mut bytes))
+        .map_err(|error| OciError::Token(error.to_string()))?;
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut token = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        token.push(HEX[(byte >> 4) as usize] as char);
+        token.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    Ok(token)
+}
+
+fn published_agent_endpoint(engine: &OsStr, name: &str) -> Result<String, OciError> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut last_message = String::new();
+    while Instant::now() < deadline {
+        let output = Command::new(engine)
+            .args([
+                "port",
+                name,
+                &format!("{}/tcp", crate::protocol::DEFAULT_AGENT_PORT),
+            ])
+            .output()
+            .map_err(|error| OciError::Port(error.to_string()))?;
+        if output.status.success() {
+            let text = String::from_utf8_lossy(&output.stdout);
+            if let Some(port) = parse_published_port(&text) {
+                return Ok(format!("127.0.0.1:{port}"));
+            }
+            last_message = text.trim().into();
+        } else {
+            last_message = output_message(&output.stderr);
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    Err(OciError::Port(if last_message.is_empty() {
+        "Docker did not publish the guest agent port".into()
+    } else {
+        last_message
+    }))
+}
+
+fn parse_published_port(value: &str) -> Option<u16> {
+    value
+        .lines()
+        .find_map(|line| line.trim().rsplit_once(':')?.1.parse().ok())
+}
+
+#[cfg(any(target_os = "linux", test))]
 fn x11_socket_path(display_name: &str) -> String {
     format!("/tmp/.X11-unix/X{}", display_name.trim_start_matches(':'))
 }
@@ -211,6 +399,11 @@ pub enum OciError {
     EngineUnavailable(String),
     Pull { image: String, message: String },
     Session(NativeError),
+    Transport(FirecrabError),
+    StartAgent(String),
+    AgentUnavailable(String),
+    Port(String),
+    Token(String),
 }
 
 impl Display for OciError {
@@ -223,6 +416,18 @@ impl Display for OciError {
                 write!(formatter, "could not pull OCI image '{image}': {message}")
             }
             Self::Session(error) => Display::fmt(error, formatter),
+            Self::Transport(error) => Display::fmt(error, formatter),
+            Self::StartAgent(message) => {
+                write!(formatter, "could not start OCI GUI agent: {message}")
+            }
+            Self::AgentUnavailable(message) => write!(
+                formatter,
+                "OCI GUI agent is unavailable: {message}; on macOS use an agent image such as examples/firecrab-xeyes"
+            ),
+            Self::Port(message) => write!(formatter, "could not resolve OCI agent port: {message}"),
+            Self::Token(message) => {
+                write!(formatter, "could not generate OCI agent token: {message}")
+            }
         }
     }
 }
@@ -231,6 +436,7 @@ impl Error for OciError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Session(error) => Some(error),
+            Self::Transport(error) => Some(error),
             _ => None,
         }
     }
@@ -268,5 +474,29 @@ mod tests {
     #[test]
     fn maps_only_the_private_x11_socket() {
         assert_eq!(x11_socket_path(":42"), "/tmp/.X11-unix/X42");
+    }
+
+    #[test]
+    fn builds_loopback_only_agent_container_command() {
+        let spec = OciApplicationSpec::new("example/gui-agent:1", [OsString::from("--flag")]);
+        let command = docker_agent_command(&spec, "microbox-test", "secret");
+        let arguments = command
+            .get_args()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(
+            arguments
+                .windows(2)
+                .any(|pair| pair == ["--publish", "127.0.0.1::5943"])
+        );
+        assert!(arguments.contains(&"MICROBOX_AGENT_TOKEN=secret".into()));
+        assert!(arguments.windows(2).any(|pair| pair == ["--", "--flag"]));
+    }
+
+    #[test]
+    fn parses_ipv4_and_ipv6_docker_ports() {
+        assert_eq!(parse_published_port("127.0.0.1:49153\n"), Some(49153));
+        assert_eq!(parse_published_port("[::1]:49154\n"), Some(49154));
+        assert_eq!(parse_published_port(""), None);
     }
 }

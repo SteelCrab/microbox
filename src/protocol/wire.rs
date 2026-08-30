@@ -29,7 +29,11 @@ pub enum AgentMessage {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClientMessage {
-    Authenticate(String),
+    Authenticate {
+        token: String,
+        width: u16,
+        height: u16,
+    },
     Input(InputEvent),
     Stop,
 }
@@ -63,7 +67,17 @@ pub fn write_client_message(
     message: &ClientMessage,
 ) -> Result<(), WireError> {
     let (kind, payload) = match message {
-        ClientMessage::Authenticate(token) => (AUTH, token.as_bytes().to_vec()),
+        ClientMessage::Authenticate {
+            token,
+            width,
+            height,
+        } => {
+            let mut payload = Vec::with_capacity(4 + token.len());
+            payload.extend_from_slice(&width.to_be_bytes());
+            payload.extend_from_slice(&height.to_be_bytes());
+            payload.extend_from_slice(token.as_bytes());
+            (AUTH, payload)
+        }
         ClientMessage::Input(InputEvent::Text(text)) => (INPUT_TEXT, text.as_bytes().to_vec()),
         ClientMessage::Input(InputEvent::Key(event)) => {
             let text = event.text.as_deref().unwrap_or("").as_bytes();
@@ -185,7 +199,11 @@ impl WireDecoder {
             return Ok(None);
         };
         let message = match kind {
-            AUTH => ClientMessage::Authenticate(decode_text(payload)?),
+            AUTH if payload.len() >= 4 => ClientMessage::Authenticate {
+                width: u16::from_be_bytes(payload[0..2].try_into().unwrap()),
+                height: u16::from_be_bytes(payload[2..4].try_into().unwrap()),
+                token: decode_text(payload[4..].to_vec())?,
+            },
             INPUT_TEXT => ClientMessage::Input(InputEvent::Text(decode_text(payload)?)),
             INPUT_KEY if payload.len() >= 10 => {
                 let text_length = u32::from_be_bytes(payload[6..10].try_into().unwrap()) as usize;
@@ -295,7 +313,11 @@ mod tests {
     #[test]
     fn round_trips_all_input_kinds() {
         let messages = [
-            ClientMessage::Authenticate("secret".into()),
+            ClientMessage::Authenticate {
+                token: "secret".into(),
+                width: 800,
+                height: 600,
+            },
             ClientMessage::Input(InputEvent::Text("한글".into())),
             ClientMessage::Input(InputEvent::Key(KeyEvent {
                 text: Some("a".into()),

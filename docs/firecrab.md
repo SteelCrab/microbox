@@ -14,10 +14,12 @@ message to authenticate with `MICROBOX_AGENT_TOKEN`. Use a random token and do
 not expose the forwarded port outside the host; the protocol is authenticated
 but is not encrypted.
 
-The host sends its terminal-derived pixel dimensions to the guest. Initial
-connection and every later terminal resize update the guest XRandR screen,
-application window, and capture buffer before the matching frame is rendered.
-Stale in-flight frames from the previous size are discarded.
+The authenticated handshake includes the host's terminal-derived pixel
+dimensions, so the guest creates Xvfb and launches the application at the
+correct initial size without a fixed bootstrap resolution. Every later terminal
+resize updates the guest XRandR screen, application window, and capture buffer
+before the matching frame is rendered. Stale in-flight frames from the previous
+size are discarded.
 
 ## Guest image
 

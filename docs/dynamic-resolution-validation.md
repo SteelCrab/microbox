@@ -1,7 +1,7 @@
 # Dynamic resolution validation
 
-검증일: 2026-08-30  
-브랜치: `feat/v0.3-dynamic-resolution`
+검증일: 2026-08-31
+브랜치: `feat/v0.4-macos-linux`
 
 ## Automated checks
 
@@ -12,6 +12,8 @@ cargo fmt --all -- --check
 cargo test --all-targets
 cargo test --all-targets -- --ignored --test-threads=1
 cargo clippy --all-targets --all-features -- -D warnings
+cargo clippy --target aarch64-apple-darwin --all-targets --all-features -- -D warnings
+cargo clippy --target x86_64-apple-darwin --all-targets --all-features -- -D warnings
 cargo check --manifest-path fuzz/Cargo.toml --all-targets
 shellcheck scripts/check-deps.sh scripts/smoke-test.sh
 ```
@@ -49,6 +51,12 @@ a9ff04ba17e65935f63881d0a054586951a3130c2987cabdc6e807d6197d1f8f  923x517
 모든 실행은 `Ctrl-C`에 exit code 0으로 종료됐습니다. 종료 후 microbox session
 record, 테스트 Docker container, private Xvfb와 application child가 남지 않은 것을
 확인했습니다.
+
+macOS와 공통으로 사용하는 OCI agent 경로도 최신 guest image를 다시 빌드한 뒤
+960×640 PTY에서 실행했습니다. Kitty Graphics command 601개(2,463,315 bytes)를
+수집했고 exit code 0, container/session 잔존 0개를 확인했습니다. `--debug` native
+검증에서는 640×384 → 960×640 변경, Kitty Graphics command 841개(3,448,938
+bytes), resize/session/render trace와 정상 cleanup을 함께 확인했습니다.
 
 Firecrab 검증은 실제 guest image와 TCP port mapping을 사용한 GUI data-plane
 검증입니다. Firecrab VM 생성·network 선택·image import/delete 같은 control-plane

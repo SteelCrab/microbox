@@ -20,8 +20,6 @@ pub struct AgentConfig {
     pub token: String,
     pub application: OsString,
     pub arguments: Vec<OsString>,
-    pub width: u16,
-    pub height: u16,
     pub fps: u16,
 }
 
@@ -33,14 +31,17 @@ pub fn run_agent(config: AgentConfig) -> Result<(), AgentError> {
         return Err(AgentError::InvalidFps(config.fps));
     }
     let listener = TcpListener::bind(&config.listen).map_err(AgentError::Listen)?;
-    let spec = ApplicationSpec::new(config.application, config.arguments);
-    let mut session = NativeSession::start(&spec, config.width, config.height)?;
     let (mut stream, _) = listener.accept().map_err(AgentError::Accept)?;
     stream.set_nodelay(true).map_err(AgentError::Io)?;
     stream
         .set_read_timeout(Some(AUTH_TIMEOUT))
         .map_err(AgentError::Io)?;
-    authenticate(&mut stream, &config.token)?;
+    let (width, height) = authenticate(&mut stream, &config.token)?;
+    if width == 0 || height == 0 || width > 4096 || height > 4096 {
+        return Err(AgentError::InvalidDisplaySize { width, height });
+    }
+    let spec = ApplicationSpec::new(config.application, config.arguments);
+    let mut session = NativeSession::start(&spec, width, height)?;
 
     let (width, height) = session.display_size();
     write_agent_message(&mut stream, &AgentMessage::Hello { width, height })?;
@@ -80,7 +81,7 @@ pub fn run_agent(config: AgentConfig) -> Result<(), AgentError> {
                 }
                 ClientMessage::Input(input) => session.inject(&input)?,
                 ClientMessage::Stop => return Ok(()),
-                ClientMessage::Authenticate(_) => return Err(AgentError::DuplicateAuth),
+                ClientMessage::Authenticate { .. } => return Err(AgentError::DuplicateAuth),
             }
         }
         if Instant::now() >= next_frame {
@@ -105,16 +106,18 @@ pub fn run_agent(config: AgentConfig) -> Result<(), AgentError> {
     Ok(())
 }
 
-fn authenticate(stream: &mut TcpStream, expected: &str) -> Result<(), AgentError> {
+fn authenticate(stream: &mut TcpStream, expected: &str) -> Result<(u16, u16), AgentError> {
     let mut decoder = WireDecoder::default();
     let mut bytes = [0; 4096];
     loop {
         if let Some(message) = decoder.next_client()? {
             return match message {
-                ClientMessage::Authenticate(actual) if constant_time_eq(&actual, expected) => {
-                    Ok(())
-                }
-                ClientMessage::Authenticate(_) => Err(AgentError::Authentication),
+                ClientMessage::Authenticate {
+                    token,
+                    width,
+                    height,
+                } if constant_time_eq(&token, expected) => Ok((width, height)),
+                ClientMessage::Authenticate { .. } => Err(AgentError::Authentication),
                 _ => Err(AgentError::AuthenticationRequired),
             };
         }
@@ -143,6 +146,7 @@ fn constant_time_eq(actual: &str, expected: &str) -> bool {
 pub enum AgentError {
     InvalidToken,
     InvalidFps(u16),
+    InvalidDisplaySize { width: u16, height: u16 },
     Listen(io::Error),
     Accept(io::Error),
     Io(io::Error),
@@ -161,6 +165,10 @@ impl Display for AgentError {
             Self::InvalidFps(fps) => {
                 write!(formatter, "agent FPS must be between 1 and 60, got {fps}")
             }
+            Self::InvalidDisplaySize { width, height } => write!(
+                formatter,
+                "agent display dimensions must be between 1 and 4096 pixels, got {width}x{height}"
+            ),
             Self::Listen(error) => write!(formatter, "could not bind GUI agent: {error}"),
             Self::Accept(error) => write!(formatter, "could not accept GUI client: {error}"),
             Self::Io(error) => Display::fmt(error, formatter),

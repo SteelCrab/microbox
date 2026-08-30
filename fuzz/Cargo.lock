@@ -242,6 +242,7 @@ version = "0.1.0"
 dependencies = [
  "crossterm",
  "ctrlc",
+ "libc",
  "memmap2",
  "nix",
  "x11rb",

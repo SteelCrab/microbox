@@ -84,6 +84,7 @@ Kitty 호환 terminal에서의 GTK Demo 수동 조작 확인은 release checklis
 
 ## v0.1 이후
 
+0. [x] Linux Native/OCI와 macOS Apple Silicon/Intel OCI-agent/Firecrab host 지원
 1. [x] Alpine/OCI application image backend (Docker engine, X11 socket,
    disposable lifecycle)
 2. [x] Firecrab MicroVM GUI data plane — authenticated guest agent, frame/input

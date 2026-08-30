@@ -27,7 +27,7 @@ const HELP: &str = r#"microbox — GUI applications, without the desktop
 Usage:
   microbox doctor
   microbox demo [--width PIXELS] [--height PIXELS]
-  microbox run <APPLICATION|OCI_IMAGE> [--runtime native|oci|firecrab] [--fps 1..60] [--stats] [-- ARGS...]
+  microbox run <APPLICATION|OCI_IMAGE> [--runtime native|oci|oci-agent|firecrab] [--fps 1..60] [--stats] [--debug] [-- ARGS...]
   microbox agent <APPLICATION> [--listen ADDRESS] [--fps 1..60] [-- ARGS...]
   microbox ps
   microbox stop <SESSION_ID>
@@ -36,8 +36,8 @@ Usage:
 Commands:
   doctor  Inspect terminal capabilities needed by microbox
   demo    Render a generated RGB frame with the Kitty Graphics Protocol
-  run     Run one host application or OCI image on a private Xvfb display
-  agent   Serve a GUI application to a Firecrab host client
+  run     Run one application through a platform-supported GUI runtime
+  agent   Serve a GUI application from a Linux guest to a host client
   ps      List running microbox sessions
   stop    Gracefully stop a running session
 "#;
@@ -117,6 +117,7 @@ struct RunOptions {
     runtime: String,
     fps: u16,
     stats: bool,
+    debug: bool,
     firecrab_endpoint: Option<String>,
 }
 
@@ -128,6 +129,7 @@ fn parse_run_options(args: &[String]) -> Result<RunOptions, String> {
     let mut runtime_explicit = false;
     let mut fps = 30;
     let mut stats = false;
+    let mut debug = false;
     let mut application_arguments = Vec::new();
     let mut firecrab_endpoint = None;
     let mut index = 1;
@@ -140,7 +142,10 @@ fn parse_run_options(args: &[String]) -> Result<RunOptions, String> {
             runtime = args
                 .get(index + 1)
                 .ok_or_else(|| "--runtime requires a value".to_string())?;
-            if !matches!(runtime, "native" | "oci" | "docker" | "firecrab") {
+            if !matches!(
+                runtime,
+                "native" | "oci" | "docker" | "oci-agent" | "firecrab"
+            ) {
                 return Err(format!("unsupported runtime '{runtime}'"));
             }
             runtime_explicit = true;
@@ -174,6 +179,11 @@ fn parse_run_options(args: &[String]) -> Result<RunOptions, String> {
             index += 1;
             continue;
         }
+        if args[index] == "--debug" {
+            debug = true;
+            index += 1;
+            continue;
+        }
         return Err(format!(
             "unexpected argument '{}'; put application arguments after --",
             args[index]
@@ -190,6 +200,7 @@ fn parse_run_options(args: &[String]) -> Result<RunOptions, String> {
         runtime: runtime.into(),
         fps,
         stats,
+        debug,
         firecrab_endpoint,
     })
 }
@@ -198,8 +209,30 @@ fn run_application(options: RunOptions) -> Result<(), String> {
     if !std::io::stdout().is_terminal() {
         return Err("stdout is not a terminal; run `microbox doctor` for details".into());
     }
+    if cfg!(target_os = "macos") && options.runtime == "native" {
+        return Err(
+            "native Linux GUI execution is unavailable on macOS; use an agent-enabled OCI image with `--runtime oci` or use `--runtime firecrab`".into(),
+        );
+    }
 
+    let debug = options.debug || std::env::var_os("MICROBOX_DEBUG").is_some();
+    let debug_started = Instant::now();
+    let mut debug_events = Vec::new();
     let initial_geometry = terminal_geometry(None)?;
+    if debug {
+        eprintln!(
+            "microbox debug: host={}/{} runtime={} app={:?} fps={} terminal={}x{} framebuffer={}x{}",
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            options.runtime,
+            options.application,
+            options.fps,
+            initial_geometry.columns,
+            initial_geometry.rows,
+            initial_geometry.pixel_width,
+            initial_geometry.pixel_height
+        );
+    }
     let session_application = options.application.clone();
     let session_runtime = match options.runtime.as_str() {
         "docker" => "oci",
@@ -214,19 +247,24 @@ fn run_application(options: RunOptions) -> Result<(), String> {
     let mut session = match options.runtime.as_str() {
         "native" => {
             let spec = ApplicationSpec::new(OsString::from(&options.application), arguments);
-            GuiSession::Native(
+            GuiSession::Native(Box::new(
                 NativeSession::start(
                     &spec,
                     initial_geometry.pixel_width,
                     initial_geometry.pixel_height,
                 )
                 .map_err(|error| error.to_string())?,
-            )
+            ))
         }
-        "oci" | "docker" => {
+        "oci" | "docker" | "oci-agent" => {
             let spec = OciApplicationSpec::new(options.application, arguments);
+            let start = if options.runtime == "oci-agent" {
+                OciSession::start_agent
+            } else {
+                OciSession::start
+            };
             GuiSession::Oci(
-                OciSession::start(
+                start(
                     &spec,
                     initial_geometry.pixel_width,
                     initial_geometry.pixel_height,
@@ -244,28 +282,47 @@ fn run_application(options: RunOptions) -> Result<(), String> {
                 })?;
             let token = std::env::var("MICROBOX_AGENT_TOKEN")
                 .map_err(|_| "Firecrab runtime requires MICROBOX_AGENT_TOKEN".to_string())?;
-            let mut session =
-                FirecrabSession::connect(&endpoint, &token).map_err(|error| error.to_string())?;
-            if session.display_size()
-                != (initial_geometry.pixel_width, initial_geometry.pixel_height)
-            {
-                session
-                    .resize(initial_geometry.pixel_width, initial_geometry.pixel_height)
-                    .map_err(|error| error.to_string())?;
-            }
+            let session = FirecrabSession::connect(
+                &endpoint,
+                &token,
+                initial_geometry.pixel_width,
+                initial_geometry.pixel_height,
+            )
+            .map_err(|error| error.to_string())?;
             GuiSession::Firecrab(session)
         }
         runtime => return Err(format!("unsupported runtime '{runtime}'")),
     };
+    record_debug(
+        debug,
+        debug_started,
+        &mut debug_events,
+        format!(
+            "backend ready display={}x{}",
+            session.display_size().0,
+            session.display_size().1
+        ),
+    );
 
     let running = Arc::new(AtomicBool::new(true));
     let signal_flag = Arc::clone(&running);
     ctrlc::set_handler(move || signal_flag.store(false, Ordering::SeqCst))
         .map_err(|error| format!("could not install Ctrl-C handler: {error}"))?;
     let registry = SessionRegistry::discover().map_err(|error| error.to_string())?;
-    let _registration = registry
+    let registration = registry
         .register(session_application, session_runtime)
         .map_err(|error| format!("could not register session: {error}"))?;
+    record_debug(
+        debug,
+        debug_started,
+        &mut debug_events,
+        format!(
+            "session registered id={} pid={} runtime={}",
+            registration.record().id,
+            registration.record().pid,
+            registration.record().runtime
+        ),
+    );
 
     let keyboard_enhanced = DoctorReport::detect().kitty_graphics_likely;
     let terminal_guard = TerminalGuard::enter(keyboard_enhanced)
@@ -310,6 +367,15 @@ fn run_application(options: RunOptions) -> Result<(), String> {
                             .resize(geometry.pixel_width, geometry.pixel_height)
                             .map_err(|error| error.to_string())?;
                         (display_width, display_height) = session.display_size();
+                        record_debug(
+                            debug,
+                            debug_started,
+                            &mut debug_events,
+                            format!(
+                                "resize cells={}x{} framebuffer={}x{}",
+                                geometry.columns, geometry.rows, display_width, display_height
+                            ),
+                        );
                         if let Some(new_mapping) = ViewportMapping::new(
                             geometry.columns,
                             geometry.rows,
@@ -352,10 +418,30 @@ fn run_application(options: RunOptions) -> Result<(), String> {
     let _ = renderer.clear();
     drop(renderer);
     drop(terminal_guard);
-    if options.stats {
+    record_debug(
+        debug,
+        debug_started,
+        &mut debug_events,
+        format!(
+            "session finished status={}",
+            if render_result.is_ok() { "ok" } else { "error" }
+        ),
+    );
+    if debug {
+        for event in &debug_events {
+            eprintln!("microbox debug: {event}");
+        }
+    }
+    if options.stats || debug {
         eprintln!("{stats}");
     }
     render_result
+}
+
+fn record_debug(enabled: bool, started: Instant, events: &mut Vec<String>, message: String) {
+    if enabled && events.len() < 1024 {
+        events.push(format!("+{:>6}ms {message}", started.elapsed().as_millis()));
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -405,14 +491,15 @@ fn geometry_from_measurements(
 }
 
 fn run_agent_command(args: &[String]) -> Result<(), String> {
+    if !cfg!(target_os = "linux") {
+        return Err(
+            "the GUI agent runs inside a Linux container or VM; start it in the guest and use the macOS host client to connect".into(),
+        );
+    }
     let Some(application) = args.first() else {
         return Err("agent requires an application".into());
     };
     let mut listen = format!("0.0.0.0:{DEFAULT_AGENT_PORT}");
-    // The guest starts with a minimal bootstrap surface; the host supplies the
-    // terminal-derived dimensions before it renders the first frame.
-    let mut width = 1;
-    let mut height = 1;
     let mut fps = 30;
     let mut arguments = Vec::new();
     let mut index = 1;
@@ -422,8 +509,6 @@ fn run_agent_command(args: &[String]) -> Result<(), String> {
             break;
         }
         let numeric = match args[index].as_str() {
-            "--width" => Some(&mut width),
-            "--height" => Some(&mut height),
             "--fps" => Some(&mut fps),
             _ => None,
         };
@@ -447,9 +532,6 @@ fn run_agent_command(args: &[String]) -> Result<(), String> {
         }
         return Err(format!("unknown agent option '{}'", args[index]));
     }
-    if width == 0 || height == 0 {
-        return Err("agent dimensions must be non-zero".into());
-    }
     if !(1..=60).contains(&fps) {
         return Err("agent FPS must be between 1 and 60".into());
     }
@@ -460,8 +542,6 @@ fn run_agent_command(args: &[String]) -> Result<(), String> {
         token,
         application: OsString::from(application),
         arguments,
-        width,
-        height,
         fps,
     })
     .map_err(|error| error.to_string())
@@ -520,7 +600,7 @@ fn looks_like_oci_reference(application: &str) -> bool {
 }
 
 enum GuiSession {
-    Native(NativeSession),
+    Native(Box<NativeSession>),
     Oci(OciSession),
     Firecrab(FirecrabSession),
 }
@@ -684,7 +764,7 @@ mod tests {
 
     #[test]
     fn accepts_oci_runtime_aliases() {
-        for runtime in ["oci", "docker"] {
+        for runtime in ["oci", "docker", "oci-agent"] {
             let options =
                 parse_run_options(&["example/gui:1".into(), "--runtime".into(), runtime.into()])
                     .unwrap();
@@ -717,6 +797,7 @@ mod tests {
                 runtime: "native".into(),
                 fps: 30,
                 stats: false,
+                debug: false,
                 firecrab_endpoint: None,
             }
         );
@@ -733,6 +814,12 @@ mod tests {
         .unwrap();
         assert_eq!(options.fps, 45);
         assert!(options.stats);
+    }
+
+    #[test]
+    fn enables_detailed_debug_output() {
+        let options = parse_run_options(&["xeyes".into(), "--debug".into()]).unwrap();
+        assert!(options.debug);
     }
 
     #[test]

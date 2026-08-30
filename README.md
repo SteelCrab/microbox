@@ -1,50 +1,120 @@
-# microbox
+<p align="center">
+  <img src="docs/assets/microbox-logo.png" width="760" alt="microbox logo">
+</p>
 
-**GUI applications, without the desktop.**
+<h1 align="center">microbox</h1>
 
-microbox is an experimental runtime for displaying and controlling a single
-Linux GUI application directly inside a terminal. It targets terminals that
-implement the Kitty Graphics Protocol and does not require a desktop
-environment, VNC, or RDP.
+<p align="center"><strong>GUI applications, without the desktop.</strong></p>
 
-> Status: pre-alpha. Native and Docker/OCI launch, X11 capture, Kitty Graphics
-> output, keyboard/mouse forwarding, and dynamic terminal-sized framebuffers are
-> implemented.
+microbox runs one Linux GUI application as if it were a terminal command. It
+renders the application with the Kitty Graphics Protocol, forwards keyboard and
+mouse input, follows terminal pixel-size changes, and owns the complete process
+lifecycle. No desktop environment, VNC, or RDP client is required.
 
-## Why microbox?
+> Status: pre-alpha. Linux Native/OCI and macOS OCI-agent/Firecrab host paths
+> are implemented. [Kitty](https://sw.kovidgoyal.net/kitty/) is the recommended
+> and primary validation terminal. Ghostty, WezTerm, and other terminals with
+> Kitty Graphics Protocol support are compatible paths.
 
-Traditional remote GUI setups expose an entire desktop. microbox instead owns
-the lifecycle of one application:
+## Platform support
 
-```text
-GUI application → private X11 display → frame capture → microbox → terminal
-terminal input  → microbox → coordinate mapping → X11 input
+| Host | Native | OCI | Firecrab |
+| --- | --- | --- | --- |
+| Linux | Xvfb application | application image or agent image | supported |
+| macOS Apple Silicon | — | Docker Desktop agent image | supported |
+| macOS Intel | — | Docker Desktop agent image | supported |
+
+macOS cannot execute a Linux binary directly. For that reason the Linux
+application, Xvfb, and `microbox agent` run inside a Docker Desktop container or
+Firecrab VM, while the native macOS binary handles terminal rendering and input.
+XQuartz is not required.
+
+## Stack architecture
+
+```mermaid
+flowchart TB
+    terminal["Kitty terminal (recommended)<br/>Ghostty · WezTerm compatible"]
+    client["microbox host client<br/>Session · Input · Dynamic geometry"]
+    render["Terminal rendering<br/>Frame diff · Kitty Graphics"]
+    transport["Runtime transport<br/>Local X11 · Authenticated TCP"]
+    backends{"Runtime backend"}
+    native["Linux Native<br/>private Xvfb"]
+    oci["OCI<br/>Docker container"]
+    firecrab["Firecrab<br/>MicroVM"]
+    guest["Linux GUI guest<br/>X11 · XDamage · XTEST"]
+    app["Single GUI application"]
+
+    terminal <--> client
+    client --> render --> terminal
+    client <--> transport <--> backends
+    backends --> native
+    backends --> oci
+    backends --> firecrab
+    native --> guest
+    oci --> guest
+    firecrab --> guest
+    guest --> app
 ```
 
-The project is independent from Firecrab. Native and OCI backends work without
-it. For MicroVM mode, microbox supplies the authenticated guest frame/input
-agent while Firecrab owns VM, image, network, and port-forward lifecycle.
+The host client is platform-native and always owns terminal I/O, coordinate
+mapping, and session lifecycle. Linux Native connects directly to a private X11
+display. macOS OCI and Firecrab use the same token-authenticated agent protocol;
+the Linux guest owns Xvfb, capture, and input injection. Initial and subsequent
+framebuffer sizes come from the live terminal pixel geometry rather than a
+fixed resolution.
 
-## Try the rendering milestone
+## Install
 
-Requirements:
+Common requirements:
 
 - Rust 1.85 or newer
-- Xvfb and the X11 application to run
-- Kitty, Ghostty, WezTerm, or another terminal implementing Kitty Graphics
+- Kitty terminal (recommended and used as the primary validation target), or a
+  terminal implementing the Kitty Graphics Protocol
+
+Build and install:
 
 ```sh
-cargo run -- doctor
-cargo run -- demo
-cargo run -- run xeyes
-cargo test
+git clone https://github.com/SteelCrab/microbox.git
+cd microbox
+cargo install --path .
+microbox doctor
 ```
 
-`demo` generates an RGB checkerboard and transmits it directly with the Kitty
-Graphics Protocol. It verifies the first part of the rendering pipeline without
-starting an X server.
+Run the examples from Kitty for the reference experience:
 
-The current native interface is:
+```sh
+kitty
+microbox doctor
+microbox run xeyes
+```
+
+Use `cargo build --release` instead when you want the binary at
+`target/release/microbox` without installing it.
+
+### Linux dependencies
+
+Ubuntu/Debian:
+
+```sh
+sudo apt-get update
+sudo apt-get install -y xvfb x11-apps x11-utils
+./scripts/check-deps.sh
+```
+
+### macOS dependencies
+
+Install Rust and Docker Desktop. Homebrew can install Rust:
+
+```sh
+brew install rust
+./scripts/check-deps.sh
+```
+
+## Quick start
+
+### Linux Native
+
+Run an installed host application:
 
 ```sh
 microbox run xeyes
@@ -52,97 +122,194 @@ microbox run firefox
 microbox run my-app -- --application-argument
 ```
 
-An OCI reference containing a registry/repository separator is detected
-automatically. `--runtime oci` (or the `docker` alias) is available for short
-local image names:
+The Native backend creates a private dynamic Xvfb display. It is fast, but it is
+not a security sandbox: the application still shares the host kernel,
+filesystem, and network.
+
+### Linux OCI
+
+Build the application-only example and run it:
 
 ```sh
 docker build -t microbox/xeyes examples/oci-xeyes
 microbox run microbox/xeyes
-microbox run local-image --runtime oci -- --application-argument
 ```
 
-The OCI backend pulls a missing image, starts a uniquely named disposable
-container, shares only the private X11 Unix socket, enables
-`no-new-privileges`, and force-removes that exact container on exit. Docker is
-the engine for this initial OCI implementation.
+On Linux this backend shares only the private X11 Unix socket with the
+container, enables `no-new-privileges`, and removes the exact disposable
+container on exit.
 
-Each foreground run publishes a user-private session record. From another
-terminal, sessions can be inspected and stopped without guessing process IDs:
+### macOS OCI
+
+macOS uses an agent-enabled image containing the application, Xvfb, and
+microbox guest agent:
+
+```sh
+docker build -f examples/firecrab-xeyes/Dockerfile \
+  -t microbox/xeyes-agent .
+
+microbox run microbox/xeyes-agent --runtime oci
+```
+
+The host publishes the guest agent on a random `127.0.0.1` port, authenticates
+with a generated 256-bit token, and removes the container when the session
+ends. Linux can test this same portable path explicitly:
+
+```sh
+microbox run microbox/xeyes-agent --runtime oci-agent
+```
+
+### Firecrab
+
+Forward guest TCP port `5943` to the host, then connect with the same token used
+by the guest agent:
+
+```sh
+MICROBOX_AGENT_TOKEN='RANDOM_SECRET' \
+microbox run firefox \
+  --runtime firecrab \
+  --firecrab-endpoint 127.0.0.1:15943
+```
+
+See the [Firecrab transport guide](docs/firecrab.md) for guest image and port
+forward configuration.
+
+## Commands
+
+| Command | Purpose |
+| --- | --- |
+| `microbox doctor` | Show terminal, host platform, and runtime diagnostics |
+| `microbox demo` | Render a generated frame without starting an X server |
+| `microbox run APP` | Start one GUI application session |
+| `microbox ps` | List live sessions for the current user |
+| `microbox stop ID` | Stop a session after PID identity verification |
+| `microbox help` | Show CLI help |
+
+Useful run options:
+
+```text
+--runtime native|oci|oci-agent|firecrab
+--fps 1..60
+--stats
+--debug
+--firecrab-endpoint HOST:PORT
+-- APPLICATION_ARGUMENTS...
+```
+
+Examples:
+
+```sh
+microbox run xeyes --fps 60 --stats
+microbox run xeyes --debug
+microbox run local-image --runtime oci
+microbox run viewer -- --fullscreen 'a file.png'
+```
+
+Press `Ctrl-C` to stop the foreground session. From another terminal:
 
 ```sh
 microbox ps
 microbox stop gui-12345
 ```
 
-`stop` sends `SIGTERM` only after matching both the recorded PID and its Linux
-process start time, preventing a stale record from targeting a reused PID.
-Records live below `$XDG_RUNTIME_DIR/microbox/sessions` (with a user-specific
-temporary fallback), are mode `0600`, and disappear on normal or signal-driven
-exit. This is cross-terminal control for foreground sessions; detachable
-rendering and re-attachment are not implemented.
+Session records are user-private, mode `0600`, and PID-reuse-safe on both Linux
+and macOS. They disappear after normal or signal-driven cleanup.
 
-`run` creates a private Xvfb display sized from the terminal's reported pixel
-dimensions, expands the first mapped window, captures the X11 root image at up
-to 30 FPS, and renders it in the terminal. If a terminal reports only rows and
-columns, microbox derives a framebuffer from the cell grid. Live terminal
-resizes update the XRandR screen, application window, capture buffer, Kitty
-placement, and input mapping together. Each dimension is bounded to 4096
-pixels. The terminal enters an alternate screen with mouse tracking; keyboard
-and mouse events are forwarded through XTEST. Press `Ctrl-C` to stop the
-application and its Xvfb process group.
+## Detailed debugging
 
-Bracketed terminal paste is forwarded as one bounded UTF-8 X11 clipboard
-transfer followed by the application's normal paste shortcut. Characters that
-are not present in the X server keymap use the same path, so composed/IME text
-can reach GTK applications without reducing it to ASCII. Clipboard payloads are
-limited to 1 MiB. Automatic GUI-to-terminal clipboard export is intentionally
-not enabled.
-
-XDamage skips unchanged captures, MIT-SHM is used when available, and small
-changes are sent as 64-pixel tile overlays. The frame rate and render counters
-can be inspected with:
+Start with the platform and terminal probe, then enable a session trace:
 
 ```sh
-microbox run xeyes --fps 30 --stats
+microbox doctor
+microbox demo
+microbox run xeyes --debug
 ```
 
-The Firecrab form connects to the authenticated microbox guest agent through a
-Firecrab TCP port forward:
+`--debug` reports the host architecture, selected runtime, application, FPS,
+terminal cell and pixel geometry, initialized display size, session ID/PID,
+every dynamic resize, final status, and render counters. The trace never prints
+the OCI/Firecrab authentication token. `MICROBOX_DEBUG=1` enables the same mode
+when changing a command line is inconvenient:
 
 ```sh
-MICROBOX_AGENT_TOKEN=RANDOM_SECRET \
-  microbox run firefox --runtime firecrab \
-  --firecrab-endpoint 127.0.0.1:15943
+MICROBOX_DEBUG=1 microbox run microbox/xeyes-agent --runtime oci
 ```
 
-See [the Firecrab transport guide](docs/firecrab.md) for the agent image,
-authentication, port-forward configuration, and current control-plane boundary.
-The native, OCI, and Firecrab live-resize capture results are recorded in the
-[dynamic resolution validation report](docs/dynamic-resolution-validation.md).
+For OCI startup problems, verify the engine and inspect only microbox-owned
+containers:
 
-## v0.1 scope
+```sh
+docker version
+docker image inspect microbox/xeyes-agent
+docker ps -a --filter 'name=^/microbox-'
+```
 
-- One foreground application per process
-- Linux and an X11/Xvfb display backend
-- Kitty Graphics full-frame and dirty-tile output
-- Keyboard, mouse, and terminal-resize forwarding with a dynamic GUI framebuffer
-- Deterministic cleanup when the application or client exits
+For Firecrab, confirm that guest port `5943` is forwarded to the loopback
+endpoint passed with `--firecrab-endpoint`, and that the host and guest use the
+same `MICROBOX_AGENT_TOKEN`. Do not expose that port publicly; the transport is
+authenticated but not encrypted.
 
-OCI, session control, composed input, and Firecrab transport are implemented on
-the post-v0.1 feature branches. Detachable sessions and Wayland remain future
-work.
+## Runtime behavior
 
-See [the v0.1 architecture](docs/architecture-v0.1.md) and
-[the implementation roadmap](docs/roadmap.md) for the concrete design and
-acceptance criteria.
+```text
+Linux GUI application
+        ↓
+private X11/Xvfb display
+        ↓
+XDamage + MIT-SHM/GetImage capture
+        ↓
+full frame or dirty 64px tiles
+        ↓
+Kitty Graphics terminal rendering
+```
 
-Build and system requirements are covered by [the installation guide](docs/install.md).
+- The framebuffer starts at the terminal's reported pixel dimensions.
+- If pixel dimensions are unavailable, microbox derives them from the cell grid.
+- Live resize updates XRandR, the application window, capture buffer, Kitty
+  placement, and input coordinates together.
+- Each framebuffer dimension is bounded to 4096 pixels.
+- Keyboard and mouse events are injected through XTEST.
+- Bracketed UTF-8 paste is served through a bounded X11 clipboard selection.
+- XDamage skips unchanged frames; slow outputs keep the newest frame instead of
+  accumulating a queue.
+
+## Development and validation
+
+```sh
+cargo fmt --all -- --check
+cargo test --all-targets
+cargo clippy --all-targets --all-features -- -D warnings
+./scripts/smoke-test.sh
+```
+
+CI builds Linux plus Apple Silicon and Intel macOS. Actual Xvfb capture, input,
+dynamic resize, crash handling, OCI agent transport, and deterministic cleanup
+have dedicated tests. See the
+[dynamic resolution validation report](docs/dynamic-resolution-validation.md)
+and [release checklist](docs/release-checklist.md).
+
+## Scope and limitations
+
+- One foreground GUI application per session
+- X11/Xvfb guest display; Wayland remains future work
+- Native execution is Linux-only
+- macOS local execution requires an agent-enabled Docker image
+- Firecrab GUI data plane is implemented; VM/network/image control-plane policy
+  remains a separate Firecrab responsibility
+- Detachable sessions, audio, and automatic GUI-to-terminal clipboard export are
+  not implemented
+
+Further details:
+
+- [Installation guide](docs/install.md)
+- [Architecture](docs/architecture-v0.1.md)
+- [Roadmap](docs/roadmap.md)
+- [Firecrab transport](docs/firecrab.md)
+- [Performance baseline](docs/performance.md)
 
 ## Project principles
 
 - Application runtime, not a desktop environment
-- Explicit lifecycle ownership
-- Runtime backends remain separate from terminal rendering
-- No false isolation claims: native and MicroVM modes have distinct security
-  boundaries
+- Explicit lifecycle ownership and deterministic cleanup
+- Runtime backends stay separate from terminal rendering
+- Native, container, and MicroVM security boundaries are described honestly

@@ -23,7 +23,19 @@ pub struct FirecrabSession {
 }
 
 impl FirecrabSession {
-    pub fn connect(endpoint: &str, token: &str) -> Result<Self, FirecrabError> {
+    pub fn connect(
+        endpoint: &str,
+        token: &str,
+        width: u16,
+        height: u16,
+    ) -> Result<Self, FirecrabError> {
+        if width == 0 || height == 0 || width > 4096 || height > 4096 {
+            return Err(FirecrabError::Protocol(format!(
+                "display dimensions must be between 1 and 4096 pixels, got {width}x{height}"
+            )));
+        }
+        Frame::rgb_buffer_len(u32::from(width), u32::from(height))
+            .map_err(|error| FirecrabError::Protocol(error.to_string()))?;
         let addresses = endpoint
             .to_socket_addrs()
             .map_err(|error| FirecrabError::Endpoint(error.to_string()))?
@@ -57,7 +69,14 @@ impl FirecrabSession {
             .set_write_timeout(Some(CONNECT_TIMEOUT))
             .map_err(FirecrabError::Io)?;
         let mut writer = reader.try_clone().map_err(FirecrabError::Io)?;
-        write_client_message(&mut writer, &ClientMessage::Authenticate(token.into()))?;
+        write_client_message(
+            &mut writer,
+            &ClientMessage::Authenticate {
+                token: token.into(),
+                width,
+                height,
+            },
+        )?;
 
         let deadline = Instant::now() + CONNECT_TIMEOUT;
         let mut decoder = WireDecoder::default();
@@ -77,7 +96,13 @@ impl FirecrabSession {
                 }
             }
         }
-        let (width, height) = dimensions.ok_or(FirecrabError::HandshakeTimeout)?;
+        let dimensions = dimensions.ok_or(FirecrabError::HandshakeTimeout)?;
+        if dimensions != (width, height) {
+            return Err(FirecrabError::Protocol(format!(
+                "agent opened {}x{} instead of requested {width}x{height}",
+                dimensions.0, dimensions.1
+            )));
+        }
         let latest = initial_frame.ok_or(FirecrabError::HandshakeTimeout)?;
         if (latest.width(), latest.height()) != (u32::from(width), u32::from(height)) {
             return Err(FirecrabError::Protocol(
@@ -278,8 +303,14 @@ mod tests {
             loop {
                 let count = stream.read(&mut bytes).unwrap();
                 decoder.push(&bytes[..count]).unwrap();
-                if let Some(ClientMessage::Authenticate(token)) = decoder.next_client().unwrap() {
+                if let Some(ClientMessage::Authenticate {
+                    token,
+                    width,
+                    height,
+                }) = decoder.next_client().unwrap()
+                {
                     assert_eq!(token, "token");
+                    assert_eq!((width, height), (2, 1));
                     break;
                 }
             }
@@ -325,7 +356,7 @@ mod tests {
             }
         });
 
-        let mut session = FirecrabSession::connect(&endpoint.to_string(), "token").unwrap();
+        let mut session = FirecrabSession::connect(&endpoint.to_string(), "token", 2, 1).unwrap();
         assert_eq!(session.display_size(), (2, 1));
         assert_eq!(session.capture().unwrap().pixels(), &[1, 2, 3, 4, 5, 6]);
         session
@@ -345,7 +376,7 @@ mod tests {
     #[test]
     fn rejects_unresolvable_endpoint() {
         assert!(matches!(
-            FirecrabSession::connect("invalid endpoint", "token"),
+            FirecrabSession::connect("invalid endpoint", "token", 1, 1),
             Err(FirecrabError::Endpoint(_))
         ));
     }

@@ -160,6 +160,7 @@ fn process_matches(record: &SessionRecord) -> Result<bool, RegistryError> {
     Ok(process_start_ticks(record.pid)? == Some(record.process_start_ticks))
 }
 
+#[cfg(target_os = "linux")]
 fn process_start_ticks(pid: u32) -> Result<Option<u64>, RegistryError> {
     let path = format!("/proc/{pid}/stat");
     let contents = match fs::read_to_string(path) {
@@ -177,6 +178,45 @@ fn process_start_ticks(pid: u32) -> Result<Option<u64>, RegistryError> {
         .parse::<u64>()
         .map_err(|_| RegistryError::InvalidRecord(format!("invalid start time for pid {pid}")))?;
     Ok(Some(start_ticks))
+}
+
+#[cfg(target_os = "macos")]
+fn process_start_ticks(pid: u32) -> Result<Option<u64>, RegistryError> {
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+    // SAFETY: proc_pidinfo writes at most the supplied proc_bsdinfo size into a
+    // valid, aligned output pointer. The value is read only after a full-size reply.
+    let bytes = unsafe {
+        libc::proc_pidinfo(
+            pid as i32,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            std::mem::size_of::<libc::proc_bsdinfo>() as i32,
+        )
+    };
+    if bytes == 0 {
+        return Ok(None);
+    }
+    if bytes as usize != std::mem::size_of::<libc::proc_bsdinfo>() {
+        return Err(RegistryError::InvalidRecord(format!(
+            "macOS returned {bytes} bytes of process information for pid {pid}"
+        )));
+    }
+    // SAFETY: the kernel returned a complete proc_bsdinfo value above.
+    let info = unsafe { info.assume_init() };
+    let identity = info
+        .pbi_start_tvsec
+        .checked_mul(1_000_000)
+        .and_then(|seconds| seconds.checked_add(info.pbi_start_tvusec))
+        .ok_or_else(|| RegistryError::InvalidRecord("process start time overflow".into()))?;
+    Ok(Some(identity))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn process_start_ticks(_pid: u32) -> Result<Option<u64>, RegistryError> {
+    Err(RegistryError::UnsupportedPlatform(
+        std::env::consts::OS.into(),
+    ))
 }
 
 fn serialize(record: &SessionRecord) -> String {
@@ -279,6 +319,7 @@ pub enum RegistryError {
     ProcessGone(u32),
     StaleSession(String),
     Signal(String),
+    UnsupportedPlatform(String),
 }
 
 impl Display for RegistryError {
@@ -309,6 +350,9 @@ impl Display for RegistryError {
             }
             Self::StaleSession(id) => write!(formatter, "session '{id}' is no longer running"),
             Self::Signal(message) => write!(formatter, "could not stop session: {message}"),
+            Self::UnsupportedPlatform(platform) => {
+                write!(formatter, "session tracking is not supported on {platform}")
+            }
         }
     }
 }
