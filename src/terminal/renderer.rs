@@ -33,10 +33,17 @@ impl<W: Write> KittyFrameRenderer<W> {
         }
     }
 
-    pub fn resize(&mut self, columns: u16, rows: u16) {
+    pub fn resize(&mut self, columns: u16, rows: u16) -> io::Result<()> {
+        // The previous full-frame image can cover more (or differently
+        // shaped) cells than the new size will. Nothing else tells the
+        // terminal those now-uncovered cells are stale, so without this
+        // it keeps showing the old size's pixels behind/around the new
+        // render.
+        self.clear()?;
         self.columns = columns.max(1);
         self.rows = rows.max(1);
         self.planner.reset();
+        Ok(())
     }
 
     pub fn render(&mut self, frame: &Frame) -> io::Result<RenderOutcome> {
@@ -156,6 +163,24 @@ mod tests {
             "tile 1 ends at column {first_right_edge}, tile 2 starts at column {} \
              (must be equal: no overlap, no gap)",
             second.0
+        );
+    }
+
+    #[test]
+    fn resize_clears_the_previous_frame_before_the_next_render() {
+        // A shrinking (or reshaped) terminal leaves the old full-frame
+        // image's cells outside the new, smaller placement uncovered by
+        // anything — nothing tells the terminal those cells are stale, so
+        // it keeps showing the previous size's pixels behind/around the
+        // new render. resize() must explicitly clear the old image first.
+        let frame = Frame::new_rgb(64, 64, vec![0; 64 * 64 * 3]).unwrap();
+        let mut renderer = KittyFrameRenderer::new(Vec::new(), 80, 24);
+        renderer.render(&frame).unwrap();
+        renderer.resize(40, 12).unwrap();
+        let output = String::from_utf8(renderer.into_inner()).unwrap();
+        assert!(
+            output.contains("\x1b_Ga=d,d=I,i=1"),
+            "resize must delete the previous full-frame image: {output:?}"
         );
     }
 

@@ -393,7 +393,9 @@ fn run_application(options: RunOptions) -> Result<(), String> {
                             columns = geometry.columns;
                             rows = geometry.rows;
                             mapping = new_mapping;
-                            renderer.resize(columns, rows);
+                            renderer
+                                .resize(columns, rows)
+                                .map_err(|error| error.to_string())?;
                             force_capture = true;
                             next_frame = Instant::now();
                         }
