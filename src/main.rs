@@ -380,24 +380,43 @@ fn run_application(options: RunOptions) -> Result<(), String> {
                             debug_started,
                             &mut debug_events,
                             format!(
-                                "resize cells={}x{} framebuffer={}x{}",
+                                "backend resized cells={}x{} framebuffer={}x{}",
                                 geometry.columns, geometry.rows, display_width, display_height
                             ),
                         );
-                        if let Some(new_mapping) = ViewportMapping::new(
+                        match ViewportMapping::new(
                             geometry.columns,
                             geometry.rows,
                             u32::from(display_width),
                             u32::from(display_height),
                         ) {
-                            columns = geometry.columns;
-                            rows = geometry.rows;
-                            mapping = new_mapping;
-                            renderer
-                                .resize(columns, rows)
-                                .map_err(|error| error.to_string())?;
-                            force_capture = true;
-                            next_frame = Instant::now();
+                            Some(new_mapping) => {
+                                columns = geometry.columns;
+                                rows = geometry.rows;
+                                mapping = new_mapping;
+                                renderer
+                                    .resize(columns, rows)
+                                    .map_err(|error| error.to_string())?;
+                                record_debug(
+                                    debug,
+                                    debug_started,
+                                    &mut debug_events,
+                                    format!(
+                                        "renderer cleared previous frame and resized cells={columns}x{rows}"
+                                    ),
+                                );
+                                force_capture = true;
+                                next_frame = Instant::now();
+                            }
+                            None => record_debug(
+                                debug,
+                                debug_started,
+                                &mut debug_events,
+                                format!(
+                                    "renderer resize skipped: no viewport mapping for cells={}x{} framebuffer={}x{}",
+                                    geometry.columns, geometry.rows, display_width, display_height
+                                ),
+                            ),
                         }
                     }
                     TerminalAction::Quit => break 'session Ok(SessionEnd::UserRequested),

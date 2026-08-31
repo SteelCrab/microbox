@@ -184,6 +184,44 @@ mod tests {
         );
     }
 
+    #[test]
+    fn clears_the_image_on_every_resize_in_a_rapid_sequence() {
+        // Dragging a terminal window resizes it many times in under a
+        // second — real sequence captured from a session that hit this
+        // bug (292x78 down to 47x57 and back up to 206x70). Every one of
+        // these must still clear the stale image, not just the first or
+        // the last, even with no render() call in between them.
+        let frame = Frame::new_rgb(64, 64, vec![0; 64 * 64 * 3]).unwrap();
+        let mut renderer = KittyFrameRenderer::new(Vec::new(), 292, 78);
+        renderer.render(&frame).unwrap();
+
+        let sizes = [
+            (278, 77),
+            (196, 65),
+            (157, 61),
+            (114, 59),
+            (90, 58),
+            (49, 57),
+            (47, 57),
+            (52, 58),
+            (69, 61),
+            (193, 70),
+            (206, 70),
+        ];
+        for (columns, rows) in sizes {
+            renderer.resize(columns, rows).unwrap();
+        }
+
+        let output = String::from_utf8(renderer.into_inner()).unwrap();
+        let delete_count = output.matches("\x1b_Ga=d,d=I,i=1").count();
+        assert_eq!(
+            delete_count,
+            sizes.len(),
+            "every resize in the sequence must clear the previous image, \
+             even back-to-back with no render() in between: {output:?}"
+        );
+    }
+
     struct BrokenPipeAfter {
         remaining: usize,
     }
