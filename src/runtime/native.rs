@@ -316,6 +316,10 @@ impl ManagedChild {
         Ok(self.status)
     }
 
+    pub(super) fn id(&self) -> u32 {
+        self.child.id()
+    }
+
     pub(super) fn terminate(&mut self) {
         if self.status().ok().flatten().is_none() {
             let process_group = Pid::from_raw(self.child.id() as i32);
