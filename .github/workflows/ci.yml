@@ -22,7 +22,12 @@ jobs:
           cargo test runtime::native::tests:: -- --ignored
       - name: Wayland compositor integration tests
         run: |
-          cargo test runtime::wayland::tests:: -- --ignored
+          cargo test runtime::wayland::tests:: -- --ignored --skip reports_sway_exit_instead_of_timing_out_on_a_long_runtime_dir_path
+      - name: Wayland compositor long-runtime-dir regression test
+        run: |
+          long_dir="/tmp/$(printf 'x%.0s' {1..80})"
+          mkdir -p "$long_dir"
+          TMPDIR="$long_dir" cargo test --lib runtime::wayland::tests::reports_sway_exit_instead_of_timing_out_on_a_long_runtime_dir_path -- --ignored --exact
 
   macos:
     strategy:
