@@ -18,6 +18,10 @@ const IPC_MAGIC: &[u8; 6] = b"i3-ipc";
 const IPC_HEADER_LEN: usize = 14;
 const IPC_RUN_COMMAND: u32 = 0;
 const IPC_GET_OUTPUTS: u32 = 3;
+// Generously more than any GET_OUTPUTS/RUN_COMMAND reply this compositor
+// issues could ever need; guards against trusting an unbounded,
+// peer-controlled length prefix off the wire.
+const MAX_IPC_REPLY_LEN: usize = 256 * 1024;
 const SWAY_CONFIG: &str = "xwayland disable\nbar {\n  swaybar_command /bin/true\n}\n";
 
 static COMPOSITOR_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -233,6 +237,9 @@ fn ipc_roundtrip(
         )));
     }
     let reply_length = u32::from_ne_bytes(header[6..10].try_into().unwrap()) as usize;
+    if reply_length > MAX_IPC_REPLY_LEN {
+        return Err(WaylandError::IpcReplyTooLarge(reply_length));
+    }
     let mut reply = vec![0u8; reply_length];
     stream.read_exact(&mut reply).map_err(WaylandError::Ipc)?;
     Ok(reply)
@@ -246,6 +253,7 @@ pub enum WaylandError {
     SwayExited(ExitStatus),
     StartupTimeout(Duration),
     Ipc(io::Error),
+    IpcReplyTooLarge(usize),
     InvalidReply(serde_json::Error),
     CommandFailed(String),
     NoHeadlessOutput,
@@ -274,6 +282,10 @@ impl Display for WaylandError {
                 timeout.as_secs_f32()
             ),
             Self::Ipc(error) => write!(formatter, "sway IPC error: {error}"),
+            Self::IpcReplyTooLarge(length) => write!(
+                formatter,
+                "sway IPC reply length {length} exceeds the {MAX_IPC_REPLY_LEN} byte limit"
+            ),
             Self::InvalidReply(error) => {
                 write!(formatter, "could not parse sway IPC reply: {error}")
             }
@@ -340,6 +352,52 @@ mod tests {
         assert!(runtime_dir.exists());
 
         let _ = fs::remove_dir_all(&runtime_dir);
+    }
+
+    #[test]
+    fn rejects_ipc_replies_that_exceed_the_length_bound() {
+        // A counter of its own: COMPOSITOR_SEQUENCE is what start() uses to
+        // name runtime dirs, and refuses_to_reuse_an_existing_runtime_dir
+        // (above) predicts the exact value start() is about to consume.
+        // Sharing a counter here would race that prediction against this
+        // test's own fetch_add whenever both run concurrently (the default
+        // for `cargo test`).
+        static TEST_SOCKET_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+        let socket_path = std::env::temp_dir().join(format!(
+            "microbox-wayland-test-ipc-bound-{}-{}.sock",
+            std::process::id(),
+            TEST_SOCKET_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_file(&socket_path);
+        let listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+
+        let server = thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                // Drain the request header the client sent (GET_OUTPUTS,
+                // empty payload).
+                let mut request = [0u8; IPC_HEADER_LEN];
+                let _ = stream.read_exact(&mut request);
+
+                // Reply with a well-formed header claiming a reply body far
+                // larger than MAX_IPC_REPLY_LEN, and never actually send
+                // that body.
+                let mut header = Vec::with_capacity(IPC_HEADER_LEN);
+                header.extend_from_slice(IPC_MAGIC);
+                header.extend_from_slice(&u32::MAX.to_ne_bytes());
+                header.extend_from_slice(&IPC_GET_OUTPUTS.to_ne_bytes());
+                let _ = stream.write_all(&header);
+            }
+        });
+
+        let result = ipc_roundtrip(&socket_path, IPC_GET_OUTPUTS, &[]);
+
+        server.join().unwrap();
+        let _ = fs::remove_file(&socket_path);
+
+        assert!(
+            matches!(result, Err(WaylandError::IpcReplyTooLarge(length)) if length == u32::MAX as usize),
+            "expected IpcReplyTooLarge(u32::MAX), got {result:?}"
+        );
     }
 
     #[test]
