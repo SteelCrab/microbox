@@ -293,13 +293,13 @@ fn connect_with_retry(display_name: &str, timeout: Duration) -> Result<X11Displa
     }
 }
 
-struct ManagedChild {
+pub(super) struct ManagedChild {
     child: Child,
     status: Option<ExitStatus>,
 }
 
 impl ManagedChild {
-    fn spawn(command: &mut Command) -> std::io::Result<Self> {
+    pub(super) fn spawn(command: &mut Command) -> std::io::Result<Self> {
         use std::os::unix::process::CommandExt;
 
         command.process_group(0);
@@ -309,14 +309,14 @@ impl ManagedChild {
         })
     }
 
-    fn status(&mut self) -> std::io::Result<Option<ExitStatus>> {
+    pub(super) fn status(&mut self) -> std::io::Result<Option<ExitStatus>> {
         if self.status.is_none() {
             self.status = self.child.try_wait()?;
         }
         Ok(self.status)
     }
 
-    fn terminate(&mut self) {
+    pub(super) fn terminate(&mut self) {
         if self.status().ok().flatten().is_none() {
             let process_group = Pid::from_raw(self.child.id() as i32);
             let _ = killpg(process_group, Signal::SIGKILL);
