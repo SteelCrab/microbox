@@ -13,13 +13,16 @@ jobs:
         with:
           components: clippy,rustfmt
       - name: Install X11 smoke-test dependencies
-        run: sudo apt-get update && sudo apt-get install -y xvfb x11-apps x11-utils
+        run: sudo apt-get update && sudo apt-get install -y xvfb x11-apps x11-utils sway
       - run: cargo fmt --check
       - run: cargo test
       - run: cargo clippy --all-targets -- -D warnings
       - name: Xvfb integration tests
         run: |
           cargo test runtime::native::tests:: -- --ignored
+      - name: Wayland compositor integration tests
+        run: |
+          cargo test runtime::wayland::tests:: -- --ignored
 
   macos:
     strategy:

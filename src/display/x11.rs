@@ -578,7 +578,7 @@ impl Clipboard {
             true
         } else if request.target == self.atoms.utf8_string
             || request.target == self.atoms.text
-            || request.target == AtomEnum::STRING.into()
+            || request.target == u32::from(AtomEnum::STRING)
         {
             connection
                 .change_property8(
