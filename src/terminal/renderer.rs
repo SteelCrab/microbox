@@ -103,8 +103,11 @@ fn placement(rect: Rect, frame: &Frame, columns: u16, rows: u16) -> (u16, u16, u
     let terminal_rows = u64::from(rows);
     let left = u64::from(rect.x) * terminal_columns / frame_width;
     let top = u64::from(rect.y) * terminal_rows / frame_height;
-    let right = (u64::from(rect.x + rect.width) * terminal_columns).div_ceil(frame_width);
-    let bottom = (u64::from(rect.y + rect.height) * terminal_rows).div_ceil(frame_height);
+    // Must use the same rounding (floor) as left/top, applied to the same
+    // pixel coordinate a neighboring tile's left/top starts at, or
+    // adjacent tiles independently round to overlapping cells.
+    let right = u64::from(rect.x + rect.width) * terminal_columns / frame_width;
+    let bottom = u64::from(rect.y + rect.height) * terminal_rows / frame_height;
     (
         left as u16,
         top as u16,
@@ -116,6 +119,45 @@ fn placement(rect: Rect, frame: &Frame, columns: u16, rows: u16) -> (u16, u16, u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn adjacent_tile_placements_never_overlap_on_a_non_exact_pixel_ratio() {
+        // A 2044x1177 pixel frame over a 292x78 cell terminal is a real
+        // reported geometry (2044/292 = 7.0 exactly, but 1177/78 ≈ 15.09
+        // isn't) — independently floor/ceil-rounding each tile's own
+        // boundary let horizontally-adjacent tiles both claim the same
+        // boundary cell, which showed up as ghosted/torn tile seams.
+        let frame = Frame::new_rgb(2044, 1177, vec![0; 2044 * 1177 * 3]).unwrap();
+        let first = placement(
+            Rect {
+                x: 0,
+                y: 0,
+                width: 64,
+                height: 64,
+            },
+            &frame,
+            292,
+            78,
+        );
+        let second = placement(
+            Rect {
+                x: 64,
+                y: 0,
+                width: 64,
+                height: 64,
+            },
+            &frame,
+            292,
+            78,
+        );
+        let first_right_edge = first.0 + first.2;
+        assert_eq!(
+            first_right_edge, second.0,
+            "tile 1 ends at column {first_right_edge}, tile 2 starts at column {} \
+             (must be equal: no overlap, no gap)",
+            second.0
+        );
+    }
 
     struct BrokenPipeAfter {
         remaining: usize,
