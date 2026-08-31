@@ -10,7 +10,6 @@ ctrlc = { version = "3.5.2", features = ["termination"] }
 crossterm = "0.29.0"
 memmap2 = "0.9.11"
 nix = { version = "0.31.3", features = ["process", "signal", "user"] }
-serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 x11rb = { version = "0.14.0", features = ["damage", "image", "randr", "shm", "xtest"] }
 xkeysym = "0.2.1"
